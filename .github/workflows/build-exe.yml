@@ -35,30 +35,6 @@ jobs:
           --collect-all webview --collect-all pythonnet --collect-all clr_loader
           --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
           exe/launcher.py
-      - name: Build a console copy for diagnostics
-        run: >-
-          pyinstaller --noconfirm --onefile --console
-          --name ModHubDebug --distpath debugdist --workpath debugbuild
-          --add-data "modhub.py;." --paths .
-          --collect-all webview --collect-all pythonnet --collect-all clr_loader
-          --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
-          exe/launcher.py
-      - name: Window engine diagnostics
-        shell: pwsh
-        continue-on-error: true
-        run: |
-          python -c "import webview, sys; print('pywebview', getattr(webview, '__version__', '?'), 'on', sys.version)"
-          pip show pythonnet clr_loader pywebview | Select-String "Name|Version"
-          $app = "$env:USERPROFILE\.modhub\app"
-          New-Item -ItemType Directory -Force $app | Out-Null
-          Copy-Item modhub.py "$app\modhub.py" -Force
-          $p = Start-Process debugdist\ModHubDebug.exe -ArgumentList "`"$app\modhub.py`"","--window","http://127.0.0.1:9/?t=x","--child" -NoNewWindow -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
-          Start-Sleep 25
-          Write-Host "still running after 25s: $(-not $p.HasExited)  exit code: $($p.ExitCode)"
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          Write-Host "---- stdout ----"; Get-Content out.txt -ErrorAction SilentlyContinue
-          Write-Host "---- stderr ----"; Get-Content err.txt -ErrorAction SilentlyContinue
-          Write-Host "---- log ----"; Get-Content "$env:USERPROFILE\.modhub\modhub.log" -ErrorAction SilentlyContinue | Select-Object -Last 60
       - name: Check that it starts
         shell: pwsh
         run: |
@@ -101,6 +77,31 @@ jobs:
           Get-Process ModHub -ErrorAction SilentlyContinue | Stop-Process -Force
           if ($result -ne "window open") { exit 1 }
           Write-Host "ModHub opened its own window, as it should."
+      - name: Build a console copy for diagnostics
+        if: failure()
+        run: >-
+          pyinstaller --noconfirm --onefile --console
+          --name ModHubDebug --distpath debugdist --workpath debugbuild
+          --add-data "modhub.py;." --paths .
+          --collect-all webview --collect-all pythonnet --collect-all clr_loader
+          --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
+          exe/launcher.py
+      - name: Window engine diagnostics
+        shell: pwsh
+        if: failure()
+        run: |
+          python -c "import webview, sys; print('pywebview', getattr(webview, '__version__', '?'), 'on', sys.version)"
+          pip show pythonnet clr_loader pywebview | Select-String "Name|Version"
+          $app = "$env:USERPROFILE\.modhub\app"
+          New-Item -ItemType Directory -Force $app | Out-Null
+          Copy-Item modhub.py "$app\modhub.py" -Force
+          $p = Start-Process debugdist\ModHubDebug.exe -ArgumentList "`"$app\modhub.py`"","--window","http://127.0.0.1:9/?t=x","--child" -NoNewWindow -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          Start-Sleep 25
+          Write-Host "still running after 25s: $(-not $p.HasExited)  exit code: $($p.ExitCode)"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "---- stdout ----"; Get-Content out.txt -ErrorAction SilentlyContinue
+          Write-Host "---- stderr ----"; Get-Content err.txt -ErrorAction SilentlyContinue
+          Write-Host "---- log ----"; Get-Content "$env:USERPROFILE\.modhub\modhub.log" -ErrorAction SilentlyContinue | Select-Object -Last 60
       - uses: actions/upload-artifact@v4
         with:
           name: windows
