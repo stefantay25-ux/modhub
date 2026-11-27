@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
@@ -222,10 +222,19 @@ def load_config():
         cfg = json.loads(CONFIG_PATH.read_text("utf-8"))
     except Exception:
         pass
-    cfg.setdefault("favorites", [])
-    had_cf = "cf_key" in cfg or any(f.get("source") == "curseforge" for f in cfg.get("favorites", []))
+    # loadouts: several named libraries. CFG["favorites"] is always the active loadout's list.
+    if not isinstance(cfg.get("loadouts"), dict) or not cfg["loadouts"]:
+        cfg["loadouts"] = {"main": {"name": "My mods", "favorites": cfg.get("favorites") or []}}
+        cfg["active_loadout"] = "main"
+    if cfg.get("active_loadout") not in cfg["loadouts"]:
+        cfg["active_loadout"] = next(iter(cfg["loadouts"]))
+    for lo in cfg["loadouts"].values():
+        lo.setdefault("favorites", [])
+    cfg["favorites"] = cfg["loadouts"][cfg["active_loadout"]]["favorites"]
+    all_favs = [f for lo in cfg["loadouts"].values() for f in lo["favorites"]]
+    had_cf = "cf_key" in cfg or any(f.get("source") == "curseforge" for f in all_favs)
     cfg.pop("cf_key", None)
-    for f in cfg.get("favorites", []):
+    for f in all_favs:
         f.setdefault("kind", "mod")
         if f.get("source") == "curseforge":  # CurseForge search was removed: keep the mod, ask for its file
             f.update(source="local", id=f"cf{f['id']}", files=[], from_curseforge=True)
@@ -233,6 +242,9 @@ def load_config():
     cfg.setdefault("paths", {})
     cfg.setdefault("last", {})
     cfg.setdefault("ports", {})
+    cfg.setdefault("installs", [])
+    cfg.setdefault("watch", {})
+    cfg.setdefault("caught_up", [])
     if had_cf:
         try:
             save_config(cfg)  # wipe the old CurseForge key from disk
@@ -244,7 +256,7 @@ def load_config():
 def save_config(cfg):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2), "utf-8")
+    tmp.write_text(json.dumps({k: v for k, v in cfg.items() if k != "favorites"}, indent=2), "utf-8")
     os.replace(tmp, CONFIG_PATH)
 
 
@@ -369,6 +381,7 @@ class Job:
         self.done = False
         self.error = None
         self.result = None
+        self.changes = []
 
     def log(self, msg):
         self.lines.append(msg)
@@ -575,6 +588,7 @@ def _place(job, folder: Path, items, managed, progress):
             else:
                 job.log(f"  + {it['name']} ({label})")
                 shutil.copy2(src, target)
+                job.changes.append(it["name"])
         elif target.exists() and (sha1_of(target) == f["sha1"].lower() if f.get("sha1") else target.stat().st_size > 0):
             job.log(f"  = {it['name']} (already there)")
         else:
@@ -582,6 +596,7 @@ def _place(job, folder: Path, items, managed, progress):
             job.log(f"  + {ver}" if ver.lower().startswith(it["name"].lower()) else f"  + {it['name']} {ver}")
             try:
                 download(f["url"], target, f.get("sha1"))
+                job.changes.append(it["name"])
             except Exception as e:
                 it["status"] = "failed"
                 it["notes"].append(f"download failed: {e}")
@@ -829,7 +844,12 @@ LAUNCHERS = {
 }
 
 
-def install_job(job, req):
+def loadout_favorites(cfg, loadout_id=None):
+    lid = loadout_id if loadout_id in cfg["loadouts"] else cfg["active_loadout"]
+    return lid, cfg["loadouts"][lid]["name"], cfg["loadouts"][lid]["favorites"]
+
+
+def install_job(job, req, remember=True):
     gv = (req.get("version") or "").strip()
     loader = req.get("loader")
     launcher = req.get("launcher")
@@ -840,29 +860,31 @@ def install_job(job, req):
     if launcher not in LAUNCHERS:
         raise UserError("Pick a launcher.")
     with CFG_LOCK:
-        cfg = json.loads(json.dumps(CFG))
-        if gv == newest_release():  # installing the newest version counts as having seen it
-            CFG["seen_newest"] = gv
-        CFG["loader"] = loader
-        CFG["last"] = {"version": gv, "loader": loader, "launcher": launcher,
-                       "folders": {**(CFG.get("last", {}).get("folders") or {}),
-                                   **({launcher: req.get("folder")} if req.get("folder") else {})}}
-        save_config(CFG)
-    if not cfg["favorites"]:
-        raise UserError("Your library is empty. Add some mods in Library first.")
-    name = (req.get("name") or "").strip() or f"ModHub {gv}"
+        cfg = json.loads(json.dumps({k: v for k, v in CFG.items() if k != "favorites"}))
+        if remember:
+            if gv == newest_release():  # installing the newest version counts as having seen it
+                CFG["seen_newest"] = gv
+            CFG["loader"] = loader
+            CFG["last"] = {"version": gv, "loader": loader, "launcher": launcher,
+                           "folders": {**(CFG.get("last", {}).get("folders") or {}),
+                                       **({launcher: req.get("folder")} if req.get("folder") else {})}}
+            save_config(CFG)
+    lid, lname, favorites = loadout_favorites(cfg, req.get("loadout"))
+    if not favorites:
+        raise UserError(f"The loadout \"{lname}\" is empty. Add some mods in Library first.")
+    name = (req.get("name") or "").strip() or (f"ModHub {gv}" if lname == "My mods" else f"{lname} {gv}")
     L = LAUNCHERS[launcher]
     ctx = {"cfg": cfg, "gv": gv, "loader": loader, "launcher": launcher, "name": name,
            "folder": req.get("folder"), "log": job.log}
 
-    job.log(f"Installing your library for Minecraft {gv} ({loader}) -> {L['name']}")
-    items = resolve(job, cfg["favorites"], gv, loader, cfg.get("ports") or {})
+    job.log(f"Installing {lname} for Minecraft {gv} ({loader}) -> {L['name']}")
+    items = resolve(job, favorites, gv, loader, cfg.get("ports") or {})
     ready = [i for i in items if i["status"] == "ready"]
     if not ready:
-        raise UserError(f"None of your mods have a {gv} {loader} version yet. Nothing was installed.")
+        raise UserError(f"Nothing in \"{lname}\" has a {gv} {loader} version yet. Nothing was installed.")
     job.progress = 0.48
     mods_dir = L["prepare"](ctx)
-    job.log(f"Downloading {len(ready)} mods...")
+    job.log(f"Downloading {len(ready)} items...")
     install_mods(job, mods_dir, items, managed=not L["finish"])
     if L["finish"]:
         job.progress = 0.95
@@ -870,8 +892,147 @@ def install_job(job, req):
     if ctx.get("open"):
         OPENABLE.add(str(ctx["open"]))
     added = sum(1 for i in items if i["status"] == "ready")
-    job.log(f"Done! {added} mods installed.")
-    return {"items": items, "message": ctx.get("message", ""), "open": str(ctx.get("open") or "")}
+    job.log(f"Done! {added} installed.")
+    install_id = record_install(req, ctx, lid, lname, mods_dir, export=bool(L["finish"]), items=items)
+    return {"items": items, "message": ctx.get("message", ""), "open": str(ctx.get("open") or ""),
+            "changes": job.changes, "install_id": install_id}
+
+
+# =========================================================================== #
+# Instances ModHub installed, keeping them updated, and watching for mods that catch up
+# =========================================================================== #
+def record_install(req, ctx, lid, lname, mods_dir, export, items):
+    launcher = ctx["launcher"]
+    folder = (req.get("folder") or "").strip()
+    iid = f"{launcher}:{folder.lower() if LAUNCHERS[launcher].get('folder') else ctx['name'].lower()}"
+    now = now_iso()
+    rec = {"id": iid, "name": ctx["name"], "launcher": launcher, "launcher_name": LAUNCHERS[launcher]["name"],
+           "version": ctx["gv"], "loader": ctx["loader"], "loadout": lid, "loadout_name": lname,
+           "folder": folder, "path": "" if export else str(mods_dir), "open": str(ctx.get("open") or ""),
+           "export": export, "updated": now,
+           "counts": {k: sum(1 for i in items if i["status"] == "ready" and i.get("kind", "mod") == k)
+                      for k in ("mod", "resourcepack", "shader")}}
+    with CFG_LOCK:
+        installs = CFG.setdefault("installs", [])
+        old = next((r for r in installs if r["id"] == iid), None)
+        rec["installed"] = old.get("installed", now) if old else now
+        installs[:] = [r for r in installs if r["id"] != iid] + [rec]
+        # watch what isn't out yet; stop watching what is
+        watch = CFG.setdefault("watch", {})
+        for it in items:
+            if not it.get("favorite") or it["source"] != "modrinth":
+                continue
+            wk = f"{it['key']}|{ctx['gv']}|{ctx['loader']}"
+            if it["status"] == "not_ready":
+                watch[wk] = {"key": it["key"], "id": it["id"], "kind": it.get("kind", "mod"), "name": it["name"],
+                             "icon": it.get("icon", ""), "url": it.get("url", ""), "version": ctx["gv"],
+                             "loader": ctx["loader"], "since": watch.get(wk, {}).get("since", now)}
+            else:
+                watch.pop(wk, None)
+                CFG["caught_up"] = [c for c in CFG.get("caught_up", [])
+                                    if not (c["key"] == it["key"] and c["version"] == ctx["gv"])]
+        save_config(CFG)
+    return iid
+
+
+def install_request(rec):
+    return {"version": rec["version"], "loader": rec["loader"], "launcher": rec["launcher"],
+            "name": rec["name"], "folder": rec.get("folder"), "loadout": rec.get("loadout")}
+
+
+def update_instance_job(job, iid):
+    with CFG_LOCK:
+        rec = next((r for r in CFG.get("installs", []) if r["id"] == iid), None)
+    if not rec:
+        raise UserError("ModHub doesn't know that instance any more.")
+    if not rec["export"] and rec.get("path") and not Path(rec["path"]).parent.exists():
+        raise UserError(f"{rec['name']}'s folder is gone. Remove it from the list, or install it again.")
+    res = install_job(job, install_request(rec), remember=False)
+    return {**res, "instance": rec["name"]}
+
+
+def update_all_job(job):
+    with CFG_LOCK:
+        recs = [r for r in CFG.get("installs", []) if not r["export"]]
+    if not recs:
+        raise UserError("There's nothing to update yet. Instances appear here after you install.")
+    summary = []
+    for n, rec in enumerate(recs, 1):
+        job.log(f"--- {rec['name']} ({n} of {len(recs)})")
+        before = len(job.changes)
+        try:
+            install_job(job, install_request(rec), remember=False)
+            summary.append({"name": rec["name"], "changes": job.changes[before:]})
+        except UserError as e:
+            summary.append({"name": rec["name"], "error": str(e)})
+        job.progress = n / len(recs)
+    return {"summary": summary}
+
+
+WATCH_SECONDS = 3 * 60 * 60
+
+
+def watch_loaders(kind, loader):
+    return {"resourcepack": ["minecraft"], "shader": ["iris", "optifine", "canvas"]}.get(kind) or search_loaders(loader)
+
+
+def check_watched():
+    """See whether any mod that wasn't out yet has caught up."""
+    with CFG_LOCK:
+        watching = dict(CFG.get("watch") or {})
+    found = []
+    for wk, w in watching.items():
+        try:
+            v = mr_latest_for(w["id"], watch_loaders(w["kind"], w["loader"]), w["version"])
+        except Exception:
+            continue
+        if v:
+            found.append((wk, {**w, "at": now_iso(), "release": v.get("version_number", "")}))
+    if found:
+        with CFG_LOCK:
+            for wk, c in found:
+                CFG["watch"].pop(wk, None)
+                CFG["caught_up"] = [x for x in CFG.get("caught_up", [])
+                                    if not (x["key"] == c["key"] and x["version"] == c["version"])] + [c]
+            save_config(CFG)
+        for _, c in found:
+            print(f"{c['name']} is now out for Minecraft {c['version']}")
+    return [c for _, c in found]
+
+
+def watch_loop():
+    time.sleep(90)
+    while True:
+        try:
+            check_watched()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(WATCH_SECONDS)
+
+
+def apply_caught_up_job(job, key, version):
+    """Add a mod that just came out to every instance of that version whose loadout has it."""
+    with CFG_LOCK:
+        c = next((x for x in CFG.get("caught_up", []) if x["key"] == key and x["version"] == version), None)
+        recs = [r for r in CFG.get("installs", [])
+                if r["version"] == version and not r["export"]
+                and (c is None or r["loader"] == c.get("loader", r["loader"]))
+                and any(f"{f['source']}:{f['id']}" == key for f in CFG["loadouts"].get(r.get("loadout"), {}).get("favorites", []))]
+    if not recs:
+        raise UserError("None of your instances for that version use this mod. Install for it from the Install page.")
+    done = []
+    for rec in recs:
+        job.log(f"--- {rec['name']}")
+        install_job(job, install_request(rec), remember=False)
+        done.append(rec["name"])
+    with CFG_LOCK:
+        CFG["caught_up"] = [x for x in CFG.get("caught_up", []) if not (x["key"] == key and x["version"] == version)]
+        save_config(CFG)
+    return {"instances": done, "changes": job.changes}
+
+
+def loadouts_view(cfg):
+    return [{"id": k, "name": v["name"], "count": len(v["favorites"])} for k, v in cfg["loadouts"].items()]
 
 
 def import_job(job, folder):
@@ -1832,6 +1993,9 @@ def state():
             "native": APP["webview"] is not None, "webview_installed": has_webview(),
             "native_broken": cfg.get("native_broken"), "version": APP_VERSION, "update": find_update(),
             "has_backup": any((DATA_DIR / "backups").glob("modhub-*.py")) if (DATA_DIR / "backups").is_dir() else False,
+            "loadouts": loadouts_view(CFG), "active_loadout": cfg.get("active_loadout"),
+            "installs": cfg.get("installs", []), "caught_up": cfg.get("caught_up", []),
+            "watching": len(cfg.get("watch") or {}),
             "update_source": cfg.get("update_source", ""), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
@@ -1861,12 +2025,84 @@ def api(path, body):
     if path == "/api/favorites/remove":
         with CFG_LOCK:
             gone = [f for f in CFG["favorites"] if f["source"] == body.get("source") and str(f["id"]) == str(body.get("id"))]
-            CFG["favorites"] = [f for f in CFG["favorites"] if f not in gone]
+            CFG["favorites"][:] = [f for f in CFG["favorites"] if f not in gone]
+            still_used = {str(f["id"]) for lo in CFG["loadouts"].values() for f in lo["favorites"] if f.get("source") == "local"}
             save_config(CFG)
         for f in gone:
-            if f["source"] == "local" and re.fullmatch(r"[\w-]+", str(f["id"])):
+            if f["source"] == "local" and re.fullmatch(r"[\w-]+", str(f["id"])) and str(f["id"]) not in still_used:
                 shutil.rmtree(LOCAL_DIR / str(f["id"]), ignore_errors=True)
         return {"favorites": CFG["favorites"]}
+    if path == "/api/loadouts/switch":
+        with CFG_LOCK:
+            if body.get("id") not in CFG["loadouts"]:
+                raise UserError("That loadout doesn't exist.")
+            CFG["active_loadout"] = body["id"]
+            CFG["favorites"] = CFG["loadouts"][body["id"]]["favorites"]
+            save_config(CFG)
+        return state()
+    if path == "/api/loadouts/create":
+        name = (body.get("name") or "").strip()[:40]
+        if not name:
+            raise UserError("Give the loadout a name.")
+        with CFG_LOCK:
+            if any(v["name"].lower() == name.lower() for v in CFG["loadouts"].values()):
+                raise UserError(f"You already have a loadout called {name}.")
+            lid = uuid.uuid4().hex[:8]
+            favs = json.loads(json.dumps(CFG["favorites"])) if body.get("copy") else []
+            CFG["loadouts"][lid] = {"name": name, "favorites": favs}
+            CFG["active_loadout"] = lid
+            CFG["favorites"] = CFG["loadouts"][lid]["favorites"]
+            save_config(CFG)
+        return state()
+    if path == "/api/loadouts/rename":
+        name = (body.get("name") or "").strip()[:40]
+        with CFG_LOCK:
+            if body.get("id") not in CFG["loadouts"] or not name:
+                raise UserError("Give the loadout a name.")
+            if any(k != body["id"] and v["name"].lower() == name.lower() for k, v in CFG["loadouts"].items()):
+                raise UserError(f"You already have a loadout called {name}.")
+            CFG["loadouts"][body["id"]]["name"] = name
+            for r in CFG.get("installs", []):
+                if r.get("loadout") == body["id"]:
+                    r["loadout_name"] = name
+            save_config(CFG)
+        return state()
+    if path == "/api/loadouts/delete":
+        with CFG_LOCK:
+            lid = body.get("id")
+            if lid not in CFG["loadouts"]:
+                raise UserError("That loadout doesn't exist.")
+            if len(CFG["loadouts"]) == 1:
+                raise UserError("You need at least one loadout.")
+            gone = CFG["loadouts"].pop(lid)
+            if CFG["active_loadout"] == lid:
+                CFG["active_loadout"] = next(iter(CFG["loadouts"]))
+                CFG["favorites"] = CFG["loadouts"][CFG["active_loadout"]]["favorites"]
+            still_used = {str(f["id"]) for lo in CFG["loadouts"].values() for f in lo["favorites"] if f.get("source") == "local"}
+            save_config(CFG)
+        for f in gone["favorites"]:
+            if f.get("source") == "local" and str(f["id"]) not in still_used and re.fullmatch(r"[\w-]+", str(f["id"])):
+                shutil.rmtree(LOCAL_DIR / str(f["id"]), ignore_errors=True)
+        return state()
+    if path == "/api/instances/update":
+        return {"job": start_job(update_instance_job, body.get("id"))}
+    if path == "/api/instances/update_all":
+        return {"job": start_job(update_all_job)}
+    if path == "/api/instances/remove":
+        with CFG_LOCK:
+            CFG["installs"] = [r for r in CFG.get("installs", []) if r["id"] != body.get("id")]
+            save_config(CFG)
+        return state()
+    if path == "/api/watch/check":
+        return {"found": check_watched(), **{k: v for k, v in state().items() if k in ("caught_up", "watching")}}
+    if path == "/api/caught_up/apply":
+        return {"job": start_job(apply_caught_up_job, body.get("key"), body.get("version"))}
+    if path == "/api/caught_up/dismiss":
+        with CFG_LOCK:
+            CFG["caught_up"] = [x for x in CFG.get("caught_up", [])
+                                if not (x["key"] == body.get("key") and x["version"] == body.get("version"))]
+            save_config(CFG)
+        return state()
     if path == "/api/local/version":
         set_local_version(body.get("id"), body.get("file"), body.get("version"))
         return {"favorites": CFG["favorites"]}
@@ -2724,6 +2960,7 @@ def main():
     prefetch_versions()
     threading.Thread(target=version_watch, daemon=True).start()
     threading.Thread(target=update_watch, daemon=True).start()
+    threading.Thread(target=watch_loop, daemon=True).start()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PREFERRED_PORT
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -2943,6 +3180,34 @@ details.more > summary:hover{color:var(--text)}
 .starter .lede{font-size:14px;margin-bottom:16px}
 
 .kindseg{margin-bottom:14px}
+.lobar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 18px}
+.lochip{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 6px 0 14px;border-radius:18px;border:1px solid var(--edge);background:var(--stone-2);color:var(--muted);font-weight:650;cursor:pointer;transition:border-color .2s,background .2s,color .2s,transform .15s}
+.lochip:hover{color:var(--text);border-color:#4b4b55}
+.lochip .c{font-size:11.5px;font-weight:700;background:var(--stone-3);border-radius:10px;padding:1px 8px;color:var(--muted)}
+.lochip .ed{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;border:0;background:none;color:inherit;cursor:pointer;opacity:.7}
+.lochip .ed:hover{background:rgba(255,255,255,.08);opacity:1}
+.lochip.on{color:var(--text);border-color:var(--accent);background:var(--accent-tint);box-shadow:0 6px 20px -12px rgba(236,58,80,.8)}
+.lochip.on .c{background:var(--accent);color:#fff}
+.lochip.add{padding:0 14px;border-style:dashed;background:none}
+.lochip:not(.on):not(.add) .ed{display:none}
+.lochip:not(.on):not(.add){padding-right:14px}
+.inst{background:var(--stone-2);border:1px solid #24242a;border-radius:14px;padding:18px;margin-bottom:12px}
+.inst-top{display:flex;gap:14px;align-items:flex-start}
+.inst-ico{width:44px;height:44px;border-radius:10px;background:var(--deep);display:grid;place-items:center;flex:none;font:800 13px var(--display);color:var(--accent-2);border:1px solid #2a2a31}
+.inst .body{flex:1;min-width:0}
+.inst .t{font-weight:700;font-size:16px}
+.inst .s{color:var(--muted);font-size:13.5px}
+.inst .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.tag{font-size:12px;font-weight:650;color:var(--muted);background:var(--stone-3);border-radius:6px;padding:2px 8px}
+.tag.lo{color:var(--text);background:var(--accent-tint);box-shadow:inset 0 0 0 1px #4a1c22}
+.inst .actions{margin-top:14px}
+.inst .res-line{margin-top:10px;font-size:13.5px;color:var(--muted)}
+.inst .res-line b{color:var(--ready)}
+.inst.busy{border-color:#4a1c22}
+.catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid #23402f}
+.catch .grow{flex:1;min-width:0}
+.catch b{display:block}
+.catch p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
 .newver{display:flex;align-items:center;gap:16px;padding:16px 18px;margin:0 0 24px;border-radius:14px;
   background:linear-gradient(90deg,var(--accent-tint),var(--stone-2) 70%);border:1px solid #4a1c22}
 .newver .big{font:800 26px/1 var(--display);color:var(--accent-2);min-width:64px;text-align:center}
@@ -3153,6 +3418,9 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
     <button class="nav" data-tab="install">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16"/></svg>
       Install</button>
+    <button class="nav" data-tab="instances">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+      Instances<span class="n" id="navInst"></span></button>
     <button class="nav" data-tab="ports">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 13l-8 8-3-3 1.4-1.4a4 4 0 0 0-5-5L5 13 3 11l8-8 2 2z"/></svg>
       Ports<span class="n" id="navPorts"></span></button>
@@ -3173,6 +3441,7 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
       <button class="btn go" id="newVerGo"></button>
       <button class="btn quiet" id="newVerLater">Not now</button>
     </div>
+    <div id="catchUp"></div>
     <!-- LIBRARY -->
     <section id="tab-library">
       <div class="page-h">
@@ -3197,6 +3466,7 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
       <div id="starter" class="hidden" style="margin-bottom:26px"></div>
       <div id="importNote" style="margin-bottom:10px"></div>
 
+      <div class="lobar" id="loBar" aria-label="Loadouts"></div>
       <div class="seg kindseg" id="kindSeg" role="tablist">
         <button class="on" data-kind="mod" role="tab">Mods</button><button data-kind="resourcepack" role="tab">Resource packs</button><button data-kind="shader" role="tab">Shaders</button>
       </div>
@@ -3233,6 +3503,13 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
           <select id="verSel" style="width:220px"></select>
           <input id="verOther" class="hidden" placeholder="Type a version, like 26.4" style="width:240px">
           <span class="loader-line">for <b id="loaderName">Fabric</b> mods <button class="linkbtn" id="changeLoader">Change</button></span>
+        </div>
+      </div>
+      <div class="block">
+        <label class="field-label" for="loSel">Loadout</label>
+        <div class="row" style="align-items:center">
+          <select id="loSel" style="width:260px"></select>
+          <span class="help" style="margin:0" id="loHelp"></span>
         </div>
       </div>
 
@@ -3275,6 +3552,19 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
         </div>
         <div id="outcome"></div>
       </div>
+    </section>
+
+    <!-- INSTANCES -->
+    <section id="tab-instances" class="hidden">
+      <div class="page-h">
+        <div>
+          <h1>Instances</h1>
+          <p class="lede">Everything ModHub has installed. Update keeps each one on the newest versions of its mods, for the same Minecraft version.</p>
+        </div>
+        <div class="actions"><button class="btn go" id="updAll">Update all</button></div>
+      </div>
+      <div id="instAllOut"></div>
+      <div id="instList"></div>
     </section>
 
     <!-- PORTS -->
@@ -3348,6 +3638,11 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
   </div>
 </div>
 
+<!-- loadout modal -->
+<div class="scrim hidden" id="loModal" role="dialog" aria-modal="true" aria-labelledby="loTitle">
+  <div class="modal" id="loBody"></div>
+</div>
+
 <!-- add files modal -->
 <div class="scrim hidden" id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle">
   <div class="modal">
@@ -3415,7 +3710,7 @@ function toast(msg) {
 let portsPoll;
 function go(tab) {
   $$(".nav").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  ["library", "install", "ports", "settings"].forEach(t => {
+  ["library", "install", "instances", "ports", "settings"].forEach(t => {
     const el = $("#tab-" + t), show = t === tab;
     const wasHidden = el.classList.contains("hidden");
     el.classList.toggle("hidden", !show);
@@ -3425,6 +3720,7 @@ function go(tab) {
   clearInterval(portsPoll);
   if (tab === "ports") { loadPorts(); portsPoll = setInterval(loadPorts, 4000); }
   if (tab === "install" && S) updateSteps();
+  if (tab === "instances" && S) renderInstances();
   window.scrollTo(0, 0);
 }
 $$(".nav").forEach(b => b.onclick = () => go(b.dataset.tab));
@@ -3437,6 +3733,8 @@ function renderInventory() {
   const all = S.favorites;
   if (typeof renderAppBits === "function" && $("#shortcutText").textContent) renderAppBits();
   $("#navLib").textContent = all.length || "";
+  const lo = (S.loadouts || []).find(l => l.id === S.active_loadout);
+  if (lo && lo.count !== all.length) { lo.count = all.length; if (typeof renderLoadouts === "function") renderLoadouts(); }
   const favs = all.filter(m => (m.kind || "mod") === libKind);
   const K = KIND[libKind];
   $("#invTitle").textContent = favs.length ? `${K.title} (${favs.length})` : K.title;
@@ -3799,7 +4097,8 @@ $("#moreLaunchers").onclick = () => { showAllLaunchers = true; renderLaunchers()
 function updateSteps() {
   const gv = getVersion();
   const l = S.launchers.find(x => x.id === launcher);
-  $("#iname").placeholder = "ModHub " + (gv || "");
+  const lo = (S.loadouts || []).find(l => l.id === S.active_loadout);
+  $("#iname").placeholder = (lo && lo.name !== "My mods" ? lo.name : "ModHub") + " " + (gv || "");
   const what = S.favorites.length ? `Install ${countText(S.favorites).replace("resource pack", "pack")}` : "Install mods";
   $("#installBtn").textContent = l ? `${what} to ${l.id === "folder" ? "a folder" : l.name}` : what;
   $("#folderRow").classList.toggle("hidden", !(l && l.folder));
@@ -3846,7 +4145,7 @@ function renderOutcome(res, gv, kind, l) {
   }
   if (missing.length) {
     h += `<div class="group"><div class="group-h"><h3>Not out for ${esc(gv)} yet</h3><span class="count">${missing.length}</span></div>
-      <p class="lede" style="font-size:14px;margin:-4px 0 12px">Choose Install again later to pick up updates, or have Claude port a mod for you now.</p>
+      <p class="lede" style="font-size:14px;margin:-4px 0 12px">${kind === "install" ? "ModHub keeps an eye on these and tells you when they come out, so you can add them with one click." : "Choose Install again later to pick up updates."} Or have Claude port a mod for you now.</p>
       <div class="list">${missing.map(i => resultRow(i, gv, i.kind === "mod" && i.source === "modrinth" ? ` <button class="btn sm" data-port="${esc(i.key)}">Port with Claude</button>` : "")).join("")}</div></div>`;
   }
   if (attn.length) {
@@ -3895,7 +4194,7 @@ async function runJob(kind) {
     });
     $("#progress").classList.add("hidden");
     lastRun = {res, gv, kind};
-    if (kind === "install") refreshVersions();
+    if (kind === "install") { refreshVersions(); api("/api/state").then(r => { S = r; renderInstances(); renderCatchUp(); renderLoadouts(); }).catch(() => {}); }
     renderOutcome(res, gv, kind, l);
     if (kind === "install") burst($("#installBtn"));
   } catch (e) {
@@ -4237,6 +4536,172 @@ function burst(fromEl) {
   })(start);
 }
 
+/* ---------- loadouts ---------- */
+function renderLoadouts() {
+  const los = S.loadouts || [];
+  $("#loBar").innerHTML = los.map(l => `
+    <span class="lochip ${l.id === S.active_loadout ? "on" : ""}" data-lo="${esc(l.id)}" role="button" tabindex="0" title="${l.id === S.active_loadout ? "Your current loadout" : "Switch to " + esc(l.name)}">
+      ${esc(l.name)} <span class="c">${l.count}</span>
+      <button class="ed" data-loedit="${esc(l.id)}" aria-label="Rename or delete ${esc(l.name)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 20h4L19 9l-4-4L4 16v4z"/></svg></button>
+    </span>`).join("") + `<span class="lochip add" id="loNew" role="button" tabindex="0">+ New loadout</span>`;
+  $$("#loBar [data-lo]").forEach(c => c.onclick = e => { if (!e.target.closest("[data-loedit]")) switchLoadout(c.dataset.lo); });
+  $$("#loBar [data-loedit]").forEach(b => b.onclick = e => { e.stopPropagation(); openLoadout(b.dataset.loedit); });
+  $("#loNew").onclick = () => openLoadout(null);
+  const sel = $("#loSel");
+  if (sel) {
+    sel.innerHTML = los.map(l => `<option value="${esc(l.id)}" ${l.id === S.active_loadout ? "selected" : ""}>${esc(l.name)} (${l.count})</option>`).join("");
+    $("#loHelp").textContent = los.length > 1 ? "Switch to install a different set." : "Make more loadouts in Library, like PvP or Building.";
+  }
+}
+async function switchLoadout(id) {
+  if (id === S.active_loadout) return;
+  S = await api("/api/loadouts/switch", {id});
+  lastResults = []; $("#results").innerHTML = "";
+  renderAll(); renderVersions(getVersion()); updateSteps();
+  const lo = S.loadouts.find(l => l.id === id);
+  toast(`Switched to ${lo ? lo.name : "loadout"}`);
+}
+$("#loSel").onchange = e => switchLoadout(e.target.value);
+function openLoadout(id) {
+  const lo = id && S.loadouts.find(l => l.id === id);
+  $("#loBody").innerHTML = lo ? `
+    <h2 id="loTitle">Edit loadout</h2>
+    <p class="lede">${lo.count} ${lo.count === 1 ? "item" : "items"} in it.</p>
+    <div style="margin-top:16px"><label class="field-label" for="loName">Name</label><input id="loName" value="${esc(lo.name)}" maxlength="40"></div>
+    <div class="foot" style="justify-content:space-between">
+      <button class="btn quiet" id="loDel" ${S.loadouts.length < 2 ? "disabled title='You need at least one loadout'" : ""}>Delete loadout</button>
+      <span class="actions"><button class="btn quiet" data-close>Cancel</button><button class="btn go" id="loSave">Save</button></span>
+    </div>` : `
+    <h2 id="loTitle">New loadout</h2>
+    <p class="lede">A separate set of mods, resource packs and shaders, like Survival, PvP or Building.</p>
+    <div style="margin-top:16px"><label class="field-label" for="loName">Name</label><input id="loName" placeholder="Survival" maxlength="40"></div>
+    <div style="margin-top:14px;display:grid;gap:8px">
+      <label class="check" style="margin:0"><input type="radio" name="loStart" value="empty" checked> Start empty</label>
+      <label class="check" style="margin:0"><input type="radio" name="loStart" value="copy"> Start with a copy of ${esc((S.loadouts.find(l => l.id === S.active_loadout) || {}).name || "this loadout")}</label>
+    </div>
+    <div class="foot"><button class="btn quiet" data-close>Cancel</button><button class="btn go" id="loSave">Create loadout</button></div>`;
+  openModal("#loModal");
+  setTimeout(() => { $("#loName").focus(); $("#loName").select(); }, 30);
+  const save = async () => {
+    try {
+      S = lo ? await api("/api/loadouts/rename", {id, name: $("#loName").value})
+             : await api("/api/loadouts/create", {name: $("#loName").value, copy: $("input[name=loStart]:checked").value === "copy"});
+      closeModals(); renderAll(); updateSteps();
+      toast(lo ? "Renamed" : `Created ${$("#loName").value.trim()}`);
+    } catch (e) { toast(e.message); }
+  };
+  $("#loSave").onclick = save;
+  $("#loName").onkeydown = e => { if (e.key === "Enter") save(); };
+  const del = $("#loDel");
+  if (del) del.onclick = async () => {
+    if (!confirm(`Delete the loadout "${lo.name}"? Your instances stay where they are.`)) return;
+    try { S = await api("/api/loadouts/delete", {id}); closeModals(); renderAll(); updateSteps(); toast(`Deleted ${lo.name}`); }
+    catch (e) { toast(e.message); }
+  };
+}
+
+/* ---------- instances ---------- */
+function renderInstances() {
+  const list = [...(S.installs || [])].sort((a, b) => (b.updated || "").localeCompare(a.updated || ""));
+  $("#navInst").textContent = list.length || "";
+  $("#updAll").classList.toggle("hidden", !list.some(r => !r.export));
+  if (!list.length) {
+    $("#instList").innerHTML = `<div class="empty"><h3>Nothing installed yet</h3><p>Instances you install from the Install page show up here, so you can update them later with one click.</p></div>`;
+    return;
+  }
+  $("#instList").innerHTML = list.map(r => {
+    const c = r.counts || {};
+    const what = [c.mod && `${c.mod} ${c.mod === 1 ? "mod" : "mods"}`, c.resourcepack && `${c.resourcepack} ${c.resourcepack === 1 ? "pack" : "packs"}`, c.shader && `${c.shader} ${c.shader === 1 ? "shader" : "shaders"}`].filter(Boolean).join(", ");
+    return `<div class="inst" data-inst="${esc(r.id)}">
+      <div class="inst-top"><div class="inst-ico">${esc(r.version)}</div>
+        <div class="body"><div class="t">${esc(r.name)}</div>
+          <div class="s">Minecraft ${esc(r.version)} with ${LOADER_NAMES[r.loader] || esc(r.loader)}, ${r.export ? "built for" : "in"} ${r.launcher === "folder" ? "a folder" : esc(r.launcher_name)}</div>
+          <div class="meta"><span class="tag lo">${esc(r.loadout_name || "My mods")}</span>${what ? `<span class="tag">${esc(what)}</span>` : ""}<span class="tag">Updated ${esc(timeAgo(r.updated))}</span></div>
+        </div></div>
+      <div class="actions">
+        ${r.export ? `<button class="btn" data-iup="${esc(r.id)}">Build a fresh pack</button>` : `<button class="btn go" data-iup="${esc(r.id)}">Update</button>`}
+        ${r.open ? `<button class="btn quiet" data-iopen="${esc(r.open)}">Show folder</button>` : ""}
+        <button class="btn quiet" data-irm="${esc(r.id)}">Remove from list</button>
+      </div>
+      <div class="res-line" data-iout></div>
+    </div>`;
+  }).join("");
+  stagger($("#instList"), ".inst");
+  $$("[data-iup]").forEach(b => b.onclick = () => updateInstance(b.dataset.iup, b));
+  $$("[data-iopen]").forEach(b => b.onclick = () => api("/api/open", {path: b.dataset.iopen}).catch(e => toast(e.message)));
+  $$("[data-irm]").forEach(b => b.onclick = async () => {
+    if (!confirm("Remove this from the list? Its files stay where they are.")) return;
+    S = await api("/api/instances/remove", {id: b.dataset.irm}); renderInstances();
+  });
+}
+function changesText(ch) {
+  const uniq = [...new Set(ch || [])];
+  return uniq.length ? `<b>Updated ${uniq.length}:</b> ${uniq.slice(0, 8).map(esc).join(", ")}${uniq.length > 8 ? " and more" : ""}` : "Everything was already up to date.";
+}
+async function updateInstance(id, btn) {
+  const card = btn.closest(".inst"), out = card.querySelector("[data-iout]");
+  const label = btn.textContent;
+  card.classList.add("busy"); btn.disabled = true; btn.innerHTML = `<span class="spin"></span> Updating`;
+  try {
+    const {job} = await api("/api/instances/update", {id});
+    const res = await follow(job, v => { if (v.lines.length) out.textContent = v.lines[v.lines.length - 1].trim(); });
+    out.innerHTML = changesText(res.changes);
+    S = await api("/api/state"); renderInstances();
+    const again = $(`.inst[data-inst="${CSS.escape(id)}"] [data-iout]`); if (again) again.innerHTML = changesText(res.changes);
+    if (res.changes.length) burst($(`.inst[data-inst="${CSS.escape(id)}"] [data-iup]`));
+  } catch (e) {
+    out.innerHTML = `<span style="color:var(--missing)">${esc(e.message)}</span>`;
+    btn.disabled = false; btn.textContent = label;
+  }
+  card.classList.remove("busy");
+}
+$("#updAll").onclick = async () => {
+  const b = $("#updAll"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Updating`;
+  $("#instAllOut").innerHTML = `<div class="progress"><div class="bar"><div id="allFill"></div></div><div class="now" id="allNow"></div></div>`;
+  try {
+    const {job} = await api("/api/instances/update_all");
+    const res = await follow(job, v => { $("#allFill").style.width = (v.progress * 100) + "%"; if (v.lines.length) $("#allNow").textContent = v.lines[v.lines.length - 1].trim(); });
+    const total = res.summary.reduce((n, x) => n + (x.changes || []).length, 0);
+    $("#instAllOut").innerHTML = `<div class="banner" style="margin:0 0 18px"><div class="grow"><b>${total ? `Updated ${total} ${total === 1 ? "item" : "items"}` : "Everything was already up to date"}</b>
+      <p>${res.summary.map(x => `${esc(x.name)}: ${x.error ? `<span style="color:var(--missing)">${esc(x.error)}</span>` : (x.changes.length ? esc([...new Set(x.changes)].join(", ")) : "up to date")}`).join("<br>")}</p></div></div>`;
+    S = await api("/api/state"); renderInstances();
+    if (total) burst(b);
+  } catch (e) { $("#instAllOut").innerHTML = `<div class="banner err" style="margin:0 0 18px"><div class="grow"><b>Update didn't finish</b><p>${esc(e.message)}</p></div></div>`; }
+  b.disabled = false; b.textContent = "Update all";
+};
+
+/* ---------- mods that caught up ---------- */
+function renderCatchUp() {
+  const list = S.caught_up || [];
+  const navI = $(".nav[data-tab=instances]");
+  let dot = navI.querySelector(".dot-new");
+  if (list.length && !dot) { navI.insertAdjacentHTML("beforeend", `<span class="dot-new" title="A mod you were waiting for is out"></span>`); $("#navInst").style.display = "none"; }
+  if (!list.length && dot) { dot.remove(); $("#navInst").style.display = ""; }
+  $("#catchUp").innerHTML = list.map(c => {
+    const has = (S.installs || []).some(r => r.version === c.version && !r.export);
+    return `<div class="catch rise" data-ck="${esc(c.key)}|${esc(c.version)}">${ico(c)}
+      <div class="grow"><b>${esc(c.name)} is now out for Minecraft ${esc(c.version)}</b><p>You were waiting for it${c.release ? `. Version ${esc(c.release)}` : ""}.</p></div>
+      <button class="btn go sm" data-capply>${has ? `Add it to my ${esc(c.version)} instances` : `Install for ${esc(c.version)}`}</button>
+      <button class="btn quiet sm" data-cdismiss>Dismiss</button></div>`;
+  }).join("");
+  $$("#catchUp .catch").forEach(el => {
+    const [key, version] = el.dataset.ck.split("|");
+    el.querySelector("[data-cdismiss]").onclick = async () => { S = await api("/api/caught_up/dismiss", {key, version}); renderCatchUp(); };
+    el.querySelector("[data-capply]").onclick = async ev => {
+      const b = ev.currentTarget;
+      if (!(S.installs || []).some(r => r.version === version && !r.export)) { go("install"); renderVersions(version); updateSteps(); return; }
+      b.disabled = true; b.innerHTML = `<span class="spin"></span> Adding`;
+      try {
+        const {job} = await api("/api/caught_up/apply", {key, version});
+        const res = await follow(job);
+        S = await api("/api/state"); renderCatchUp(); renderInstances();
+        toast(`Added to ${res.instances.join(", ")}`); burst($("#catchUp") || document.body);
+      } catch (e) { toast(e.message); b.disabled = false; b.textContent = "Try again"; }
+    };
+  });
+}
+setInterval(async () => { try { const r = await api("/api/state"); if (JSON.stringify(r.caught_up) !== JSON.stringify(S.caught_up)) { S.caught_up = r.caught_up; S.installs = r.installs; renderCatchUp(); } } catch (e) {} }, 10 * 60 * 1000);
+
 /* ---------- new Minecraft versions ---------- */
 let newVerPoll;
 function renderNewVersion() {
@@ -4337,7 +4802,7 @@ $("#quitBtn").onclick = async () => {
   document.body.innerHTML = `<main style="padding:60px"><h1>ModHub has stopped</h1><p class="lede">You can close this tab.</p></main>`;
 };
 
-function renderAll() { renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
+function renderAll() { renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
 (async function init() {
   S = await api("/api/state");
