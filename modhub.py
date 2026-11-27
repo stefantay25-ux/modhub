@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.5.1"
+APP_VERSION = "3.5.2"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -3838,9 +3838,15 @@ _ICON_CACHE = {}
 
 
 def icon_png(n):
-    """ModHub's mark: a 2x2 block of rounded squares (crimson, slate, slate, light grey) on a black tile."""
+    """ModHub's mark as a PNG."""
     if n in _ICON_CACHE:
         return _ICON_CACHE[n]
+    _ICON_CACHE[n] = _png(n, n, icon_rgba(n))
+    return _ICON_CACHE[n]
+
+
+def icon_rgba(n):
+    """ModHub's mark: a 2x2 block of rounded squares (crimson, slate, slate, light grey) on a black tile."""
     bg, slate, amber, green = (16, 16, 19), (58, 58, 66), (215, 38, 61), (232, 230, 227)  # crimson + light grey on black
     R = n * 0.2  # tile corner radius
     pad, gap = n * 0.2, n * 0.06
@@ -3870,8 +3876,34 @@ def icon_png(n):
                         c = colors[i][j]
             row += bytes(c) + b"\xff"
         rows.append(bytes(row))
-    _ICON_CACHE[n] = _png(n, n, rows)
-    return _ICON_CACHE[n]
+    return rows
+
+
+def classic_ico(sizes=(16, 24, 32, 48, 64)):
+    """A .ico made of plain bitmaps. Windows' window code (System.Drawing) rejects PNG-based icons."""
+    import struct
+    blobs = []
+    for n in sizes:
+        rows = icon_rgba(n)
+        pixels = b"".join(bytes(b for px in range(n) for b in (r[px * 4 + 2], r[px * 4 + 1], r[px * 4], r[px * 4 + 3]))
+                          for r in reversed(rows))  # bottom-up BGRA
+        stride = ((n + 31) // 32) * 4
+        mask = bytearray()
+        for r in reversed(rows):
+            line = bytearray(stride)
+            for px in range(n):
+                if r[px * 4 + 3] == 0:
+                    line[px // 8] |= 0x80 >> (px % 8)
+            mask += line
+        head = struct.pack("<IiiHHIIiiII", 40, n, n * 2, 1, 32, 0, len(pixels) + len(mask), 0, 0, 0, 0)
+        blobs.append((n, head + pixels + bytes(mask)))
+    out = struct.pack("<HHH", 0, 1, len(blobs))
+    offset = 6 + 16 * len(blobs)
+    entries, data = b"", b""
+    for n, blob in blobs:
+        entries += struct.pack("<BBBBHHII", n % 256, n % 256, 0, 0, 1, 32, len(blob), offset + len(data))
+        data += blob
+    return out + entries + data
 
 
 def write_icons():
@@ -3889,6 +3921,7 @@ def write_icons():
         entries += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(data), offset + len(blobs))
         blobs += data
     (d / "modhub.ico").write_bytes(head + entries + blobs)
+    (d / "modhub-window.ico").write_bytes(classic_ico())
     # .icns for macOS (PNG-based entries)
     parts = b"".join(t + struct.pack(">I", len(data) + 8) + data
                      for t, data in ((b"ic07", icon_png(128)), (b"ic08", png256), (b"ic09", icon_png(512))))
@@ -4285,7 +4318,7 @@ def run_window_helper(url):
         win.events.shown += on_shown
     except Exception:
         threading.Timer(3, on_shown).start()
-    icon = str(write_icons() / "modhub.png")
+    icon = str(write_icons() / ("modhub-window.ico" if platform.system() == "Windows" else "modhub.png"))
     try:
         webview.start(private_mode=False, storage_path=str(DATA_DIR / "webview"), icon=icon)
     except TypeError:  # older pywebview
