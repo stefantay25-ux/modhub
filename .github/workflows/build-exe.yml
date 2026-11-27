@@ -32,7 +32,8 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name ModHub --icon build/modhub.ico
           --add-data "modhub.py;." --paths .
-          --collect-all webview --hidden-import clr
+          --collect-all webview --collect-all pythonnet --collect-all clr_loader
+          --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
           exe/launcher.py
       - name: Check that it starts
         shell: pwsh
@@ -53,6 +54,29 @@ jobs:
             exit 1
           }
           Write-Host "ModHub.exe started and answered, as it should."
+      - name: Check that its own window opens
+        shell: pwsh
+        run: |
+          $dir = "$env:USERPROFILE\.modhub"
+          Remove-Item "$dir\running.json", "$dir\modhub.log" -ErrorAction SilentlyContinue
+          $p = Start-Process dist\ModHub.exe -PassThru
+          $result = "no answer"
+          foreach ($i in 1..40) {
+            Start-Sleep 2
+            if (-not (Test-Path "$dir\running.json")) { continue }
+            try {
+              $info = Get-Content "$dir\running.json" -Raw | ConvertFrom-Json
+              $s = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($info.port)/api/state" -Headers @{ "X-Token" = $info.token } -ContentType "application/json" -Body "{}"
+              if ($s.native) { $result = "window open"; break }
+              if ($s.native_broken) { $result = "window failed: $($s.native_broken.reason)"; break }
+            } catch {}
+          }
+          Write-Host "Result: $result"
+          Write-Host "---- ModHub's log ----"
+          Get-Content "$dir\modhub.log" -ErrorAction SilentlyContinue | Select-Object -Last 120
+          Get-Process ModHub -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($result -ne "window open") { exit 1 }
+          Write-Host "ModHub opened its own window, as it should."
       - uses: actions/upload-artifact@v4
         with:
           name: windows
