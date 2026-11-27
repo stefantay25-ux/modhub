@@ -53,9 +53,17 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.1", "notes": [
+        "New: gradient backgrounds. Your colour fades into black in dark mode, or into white in light mode. Pick Gradient, Vivid, Glow or Plain, choose the direction, and set the strength.",
+        "New: any colour you like. Pick Custom under Colour to choose your own.",
+        "More ways to make ModHub yours: rounder or sharper corners, a see-through sidebar, four sizes, and fewer or no animations.",
+        "Updates now come straight from GitHub by themselves. There's nothing to set up any more.",
+        "Settings is laid out in tidy cards, and the Install page is grouped the same way.",
+        "Sharper pictures: mod pages open with the mod's featured image and use full-size screenshots, and Discover shows a screenshot for each mod.",
+    ]},
     {"version": "3.0", "notes": [
         "New: Discover. See what's popular and freshly updated for your Minecraft version, plus picks that go with the mods you already have.",
         "New: mod pages. Click any mod to see its screenshots, description, what it needs and whether it's out for your version.",
@@ -342,6 +350,7 @@ def mr_search(query, loader=None, limit=20, kind="mod", version=None, index=None
     return [{"source": "modrinth", "id": h["project_id"], "slug": h.get("slug"), "name": h.get("title"),
              "desc": h.get("description", ""), "icon": h.get("icon_url") or "", "downloads": h.get("downloads", 0),
              "author": h.get("author", ""), "kind": kind,
+             "shot": _https(h.get("featured_gallery") or next(iter(h.get("gallery") or []), "")),
              "url": f"https://modrinth.com/{kind}/{h.get('slug') or h['project_id']}"}
             for h in r.get("hits") or []]
 
@@ -410,8 +419,10 @@ def project_page(pid, version, loader):
     out = mr_fav(p)
     out.update(body=(p.get("body") or "")[:20000], downloads=p.get("downloads", 0), followers=p.get("followers", 0),
                categories=[c for c in p.get("categories") or [] if c not in LOADERS][:8], loaders=p.get("loaders") or [],
-               gallery=[{"url": g.get("url"), "title": g.get("title") or ""} for g in (p.get("gallery") or [])
-                        if isinstance(g, dict) and str(g.get("url", "")).startswith("https://")][:8],
+               gallery=[{"url": _https(g.get("url")), "full": _https(g.get("raw_url")) or _https(g.get("url")),
+                         "title": g.get("title") or "", "featured": bool(g.get("featured"))}
+                        for g in sorted(p.get("gallery") or [], key=lambda g: (not g.get("featured"), g.get("ordering", 0)))
+                        if isinstance(g, dict) and _https(g.get("url"))][:10],
                license=(p.get("license") or {}).get("name") or (p.get("license") or {}).get("id") or "",
                updated=p.get("updated") or "", links={k: p.get(k) for k in ("source_url", "issues_url", "wiki_url", "discord_url")
                                                        if str(p.get(k) or "").startswith("https://")})
@@ -437,6 +448,10 @@ def project_page(pid, version, loader):
     except Exception:
         out["author"] = ""
     return out
+
+
+def _https(u):
+    return u if isinstance(u, str) and u.startswith("https://") else ""
 
 
 def mr_projects(ids):
@@ -2705,20 +2720,51 @@ def update_search_dirs():
 
 
 THEME_MODES = ("dark", "light", "system")
-THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose")
+THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose", "custom")
+THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain"), "dir": ("top", "corner", "side", "bottom"),
+                 "radius": ("sharp", "rounded", "round"), "side": ("glass", "solid"),
+                 "size": ("90", "100", "110", "120"), "motion": ("full", "less", "off")}
+THEME_DEFAULTS = {"mode": "dark", "accent": "crimson", "custom": "#d7263d", "bg": "gradient", "dir": "top", "strength": 55,
+                  "radius": "rounded", "side": "glass", "size": "100", "motion": "full"}
 
 
 def theme_of(cfg):
     t = cfg.get("theme") if isinstance(cfg.get("theme"), dict) else {}
-    return {"mode": t.get("mode") if t.get("mode") in THEME_MODES else "dark",
-            "accent": t.get("accent") if t.get("accent") in THEME_ACCENTS else "crimson"}
+    out = dict(THEME_DEFAULTS)
+    if t.get("mode") in THEME_MODES:
+        out["mode"] = t["mode"]
+    if t.get("accent") in THEME_ACCENTS:
+        out["accent"] = t["accent"]
+    if isinstance(t.get("custom"), str) and re.fullmatch(r"#[0-9a-fA-F]{6}", t["custom"]):
+        out["custom"] = t["custom"].lower()
+    for k, allowed in THEME_CHOICES.items():
+        if str(t.get(k)) in allowed:
+            out[k] = str(t[k])
+    try:
+        out["strength"] = max(10, min(100, int(t.get("strength", out["strength"]))))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def theme_vars(t):
+    """The CSS variables for a theme, so the page opens in the right look with no flash."""
+    css = [f"--bgk:{t['strength'] / 100:.2f}", f"--ui-zoom:{int(t['size']) / 100:.2f}"]
+    if t["accent"] == "custom":
+        h = t["custom"].lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        mix = lambda c, w, k: round(c + (w - c) * k)
+        css += [f"--acc:{r} {g} {b}", f"--acc2:{mix(r, 255, .18)} {mix(g, 255, .18)} {mix(b, 255, .18)}",
+                f"--acc3:{mix(r, 0, .28)} {mix(g, 0, .28)} {mix(b, 0, .28)}"]
+    return ";".join(css)
 
 
 def page_html():
     with CFG_LOCK:
         t = theme_of(CFG)
-    return PAGE.replace("__TOKEN__", TOKEN).replace(
-        '<html lang="en">', f'<html lang="en" data-pref="{t["mode"]}" data-accent="{t["accent"]}">', 1)
+    attrs = (f'data-pref="{t["mode"]}" data-accent="{t["accent"]}" data-bg="{t["bg"]}" data-dir="{t["dir"]}" '
+             f'data-radius="{t["radius"]}" data-side="{t["side"]}" data-motion="{t["motion"]}" style="{theme_vars(t)}"')
+    return PAGE.replace("__TOKEN__", TOKEN).replace('<html lang="en">', f'<html lang="en" {attrs}>', 1)
 
 
 def changes_in_text(text):
@@ -2777,6 +2823,14 @@ def find_update(force=False):
 UPDATE_CHECK_SECONDS = 6 * 60 * 60
 
 
+# Where ModHub gets its updates. Everyone pulls from the official repo unless they chose another.
+DEFAULT_UPDATE_SOURCE = os.environ.get("MODHUB_UPDATE_SOURCE", "stefantay25-ux/modhub")
+
+
+def current_update_source(cfg=None):
+    return ((cfg if cfg is not None else CFG).get("update_source") or DEFAULT_UPDATE_SOURCE).strip()
+
+
 def update_source_url(src):
     """'name/repo', a github.com link, or a direct https link -> the URL of modhub.py."""
     src = (src or "").strip().strip('"')
@@ -2797,7 +2851,7 @@ def update_source_url(src):
 def check_online_update():
     """Download a newer ModHub from your update source, if there is one. It's installed on the next start."""
     with CFG_LOCK:
-        url = update_source_url(CFG.get("update_source"))
+        url = update_source_url(current_update_source())
     if not url:
         return None
     result = {"at": now_iso()}
@@ -3049,7 +3103,7 @@ def state():
             "loadouts": loadouts_view(CFG), "active_loadout": cfg.get("active_loadout"),
             "installs": cfg.get("installs", []), "caught_up": cfg.get("caught_up", []),
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
-            "update_source": cfg.get("update_source", ""), "update_auto": cfg.get("update_auto", True),
+            "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
             "theme": theme_of(cfg),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
@@ -3217,11 +3271,11 @@ def api(path, body):
         return {"added": added, "favorites": CFG["favorites"]}
     if path == "/api/theme":
         with CFG_LOCK:
+            if body.get("reset"):
+                CFG["theme"] = {"mode": theme_of(CFG)["mode"]}
+            else:
+                CFG["theme"] = {**theme_of(CFG), **{k: v for k, v in body.items() if k in THEME_DEFAULTS}}
             t = theme_of(CFG)
-            if body.get("mode") in THEME_MODES:
-                t["mode"] = body["mode"]
-            if body.get("accent") in THEME_ACCENTS:
-                t["accent"] = body["accent"]
             CFG["theme"] = t
             save_config(CFG)
         return {"theme": t}
@@ -3314,9 +3368,9 @@ def api(path, body):
             save_config(CFG)
         return {"ok": True}
     if path == "/api/update/check":
-        if CFG.get("update_source"):
+        if current_update_source():
             check_online_update()
-        return {"update": find_update(force=True), "version": APP_VERSION}
+        return {"update": find_update(force=True), "version": APP_VERSION, "update_last_check": CFG.get("update_last_check")}
     if path == "/api/update/apply":
         new_version = apply_update(body.get("path") or "")
         restart_app()
@@ -4135,7 +4189,7 @@ PAGE = r'''<!DOCTYPE html>
   --link:color-mix(in srgb,var(--accent-2) 65%,#fff);
   --amber:#f0a43a; --attn:#7cb8ff; --ready:#45b97c; --missing:#ff5a5f;
   --mr:#1bd96a; --cf:#f16436;
-  --hi:255 255 255; --shk:1; --knob:#cfccd2; --glass:19 19 22; --toast:243 241 239; --toast-ink:#0b0b0d;
+  --hi:255 255 255; --shk:1; --knob:#cfccd2; --deep-rgb:11 11 13; --glass:19 19 22; --toast:243 241 239; --toast-ink:#0b0b0d;
   color-scheme:dark;
   --display: "Segoe UI Variable Display", ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
   --body: "Segoe UI Variable Text", "Segoe UI Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -4146,7 +4200,7 @@ PAGE = r'''<!DOCTYPE html>
   --text:#17161a; --muted:#57545d; --faint:#7c7984;
   --link:color-mix(in srgb,var(--accent) 80%,#000);
   --amber:#a8650a; --attn:#2563c9; --ready:#1d7f4d; --missing:#d0343a;
-  --hi:0 0 0; --shk:.32; --knob:#ffffff; --glass:252 252 253; --toast:23 22 26; --toast-ink:#ffffff;
+  --hi:0 0 0; --shk:.32; --knob:#ffffff; --deep-rgb:236 235 239; --glass:252 252 253; --toast:23 22 26; --toast-ink:#ffffff;
   color-scheme:light;
 }
 :root[data-accent="emerald"]{--acc:14 158 90; --acc2:22 190 108; --acc3:10 110 64}
@@ -4482,9 +4536,7 @@ code.inline{background:var(--deep);padding:1px 6px;border-radius:5px;font-size:1
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--stone-4);border-radius:10px;border:2px solid var(--stone)}
 ::-webkit-scrollbar-thumb:hover{background:var(--edge)}
-body{background:
-  radial-gradient(900px 520px at 88% -12%, rgb(var(--acc) / .11), transparent 62%),
-  radial-gradient(700px 420px at 30% 112%, rgb(var(--acc) / .05), transparent 60%), var(--stone);background-attachment:fixed}
+body{background-attachment:fixed}
 .side{border-right:1px solid var(--stone)}
 h1{background:linear-gradient(180deg,var(--text) 30%,color-mix(in srgb,var(--text) 72%,var(--stone)));-webkit-background-clip:text;background-clip:text;color:transparent}
 .page-h{animation:rise .5s cubic-bezier(.2,.9,.3,1) both}
@@ -4646,8 +4698,8 @@ select option{background:var(--stone-2)}
 /* frosted page bar on scroll */
 .topbar{position:fixed;top:0;left:232px;right:0;z-index:30;height:56px;display:flex;align-items:center;gap:14px;padding:0 48px;
   background:rgb(var(--glass) / .72);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgb(var(--hi) / .06);
-  box-shadow:0 12px 30px -18px rgb(0 0 0 / calc(.8 * var(--shk)));transform:translateY(-102%);transition:transform .32s cubic-bezier(.2,.9,.3,1)}
-.topbar.show{transform:none}
+  box-shadow:none;transform:translateY(-102%);visibility:hidden;transition:transform .32s cubic-bezier(.2,.9,.3,1),visibility 0s .32s,box-shadow .3s}
+.topbar.show{transform:none;visibility:visible;transition:transform .32s cubic-bezier(.2,.9,.3,1),box-shadow .3s;box-shadow:0 12px 30px -18px rgb(0 0 0 / calc(.8 * var(--shk)))}
 .topbar .tt{font:800 17px/1 var(--display);letter-spacing:-.2px;opacity:0;transform:translateY(8px) scale(1.25);transform-origin:left center;transition:opacity .3s .05s,transform .4s .05s cubic-bezier(.2,.9,.3,1)}
 .topbar.show .tt{opacity:1;transform:none}
 .topbar .top-up{margin-left:auto}
@@ -4798,6 +4850,101 @@ details.adv[open] > *:not(summary){margin-top:14px}
 :root[data-mode="light"] .slot{box-shadow:inset 3px 3px 0 rgb(0 0 0 / .14),inset -3px -3px 0 rgb(255 255 255 / .7)}
 :root[data-mode="light"] .modal,:root[data-mode="light"] .pal{box-shadow:0 30px 80px -24px rgb(20 20 30 / .35),0 0 0 1px rgb(0 0 0 / .06)}
 :root[data-mode="light"] .btn.go,:root[data-mode="light"] .nav.on{box-shadow:none}
+
+
+/* tidier pages */
+#tab-install > .block:not(:has(#installBtn)){padding:18px 20px 20px;margin-bottom:12px;border:1px solid var(--line);border-radius:18px;background:color-mix(in srgb,var(--stone-2) 80%,transparent)}
+#tab-install > .block:not(:has(#installBtn)) + .block{padding-top:18px}
+#tab-install > .block:has(#installBtn){padding-top:10px}
+:root[data-radius="sharp"] #tab-install > .block{border-radius:3px}
+:root[data-radius="round"] #tab-install > .block{border-radius:22px}
+.page-h{margin-bottom:22px}
+.inv-h{margin:34px 0 14px}
+
+/* pictures */
+.dcard.has-shot{padding-top:0;overflow:hidden}
+.dcard .shot{margin:0 -16px 2px;aspect-ratio:16/7;overflow:hidden;background:var(--stone-3);position:relative}
+.dcard .shot.empty{background:linear-gradient(135deg,var(--accent-tint),color-mix(in srgb,var(--stone-3) 70%,transparent))}
+.dcard .shot img.blur{position:absolute;inset:-20%;width:140%;height:140%;object-fit:cover;filter:blur(26px) saturate(140%);opacity:.55}
+.dcard .shot img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .5s cubic-bezier(.2,.8,.2,1)}
+.dcard:hover .shot img{transform:scale(1.05)}
+.dcard.has-shot .top{position:relative;align-items:flex-end}
+.dcard.has-shot .top .ico{margin-top:-30px}
+.dcard.has-shot .top .ico{box-shadow:0 0 0 3px var(--stone-2),0 8px 18px -8px rgb(0 0 0 / calc(.8 * var(--shk)))}
+.mp-banner{height:240px;overflow:hidden;cursor:zoom-in;position:relative;background:var(--stone-3)}
+.mp-banner img{width:100%;height:100%;object-fit:cover;display:block}
+.mp-banner::after{content:"";position:absolute;inset:0;background:linear-gradient(to bottom,transparent 45%,var(--stone) 100%)}
+.mp-head.on-banner{margin-top:-46px;position:relative;z-index:1;align-items:flex-end}
+.mp-head.on-banner .ico{box-shadow:0 0 0 4px var(--stone),0 14px 30px -12px rgb(0 0 0 / calc(.9 * var(--shk)))}
+.mp-gal img{height:170px;width:auto;aspect-ratio:16/9;image-rendering:auto}
+.mp-zoom{display:flex;flex-direction:column;gap:12px;align-items:center;justify-content:center}
+.mp-zoom img{max-width:94vw;max-height:84vh;image-rendering:auto}
+.mp-zoom span{color:#f3f1ef;font-size:14px}
+.ico img{image-rendering:auto}
+/* ---------- 3.1: backgrounds, customisation, cards ---------- */
+:root{zoom:var(--ui-zoom,1);--gdir:180deg;--gpos:50% -12%}
+:root[data-dir="corner"]{--gdir:150deg;--gpos:0% 0%}
+:root[data-dir="side"]{--gdir:90deg;--gpos:-8% 45%}
+:root[data-dir="bottom"]{--gdir:0deg;--gpos:50% 112%}
+body,.ap-prev{background-color:var(--stone)}
+:root[data-bg="gradient"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc) / calc(.46 * var(--bgk,.55))) 0%,rgb(var(--acc) / calc(.14 * var(--bgk,.55))) 38%,transparent 72%)}
+:root[data-bg="vivid"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc) / calc(.9 * var(--bgk,.55))) 0%,rgb(var(--acc3) / calc(.5 * var(--bgk,.55))) 48%,rgb(var(--acc3) / calc(.16 * var(--bgk,.55))) 100%)}
+:root[data-mode="light"][data-bg="vivid"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc2) / calc(.75 * var(--bgk,.55))) 0%,rgb(var(--acc2) / calc(.28 * var(--bgk,.55))) 50%,rgb(var(--acc2) / calc(.08 * var(--bgk,.55))) 100%)}
+:root[data-bg="glow"] :is(body,.ap-prev){background-image:radial-gradient(1100px 720px at var(--gpos),rgb(var(--acc) / calc(.42 * var(--bgk,.55))),transparent 64%)}
+.app{min-height:calc(100vh / var(--ui-zoom,1))}
+.side{height:calc(100vh / var(--ui-zoom,1))}
+.modal{max-height:calc(92vh / var(--ui-zoom,1))}
+.modpage{max-height:min(calc(88vh / var(--ui-zoom,1)),980px)}
+:root[data-side="glass"] .app{background:none}
+:root[data-side="glass"] .side{background:rgb(var(--deep-rgb) / .5);backdrop-filter:blur(20px) saturate(150%);-webkit-backdrop-filter:blur(20px) saturate(150%);border-right:1px solid rgb(var(--hi) / .06)}
+:root:not([data-bg="plain"]) :is(.results,.inst,.lopt,.dcard,.card,.empty,.starter,.banner,.mp-status){background-color:color-mix(in srgb,var(--stone-2) 80%,transparent)}
+:root:not([data-bg="plain"]) .inv{background-color:color-mix(in srgb,var(--deep) 72%,transparent)}
+:root:not([data-bg="plain"]) :is(input[type=text],input:not([type]),select,.seg){background-color:color-mix(in srgb,var(--deep) 78%,transparent)}
+/* corners */
+:root[data-radius="sharp"] :is(.btn,input,select,.seg,.seg button,.segpill,.res,.results,.inv,.lopt,.banner,.modal,.dcard,.inst,.empty,.card,.pal,.kpill,.lochip,.chip,.nav,#navPill,.starter,.toast,.wn-fab,.mp-status,.mp-gal img,.mp-banner,.dcard .shot,.slot,.ico,.live){border-radius:3px !important}
+:root[data-radius="round"] :is(.btn,input,select,.seg,.seg button,.segpill,.kpill,.lochip,.chip,.wn-fab,.mp-status){border-radius:999px !important}
+:root[data-radius="round"] :is(.res,.results,.inv,.lopt,.banner,.dcard,.inst,.empty,.card,.starter,.live){border-radius:22px !important}
+:root[data-radius="round"] :is(.modal,.pal){border-radius:26px !important}
+:root[data-radius="round"] :is(.nav,#navPill){border-radius:14px !important}
+/* animations */
+:root[data-motion="off"] *,:root[data-motion="off"] *::before,:root[data-motion="off"] *::after{animation:none !important;transition:none !important}
+:root[data-motion="less"] :is(.rise,.dot-new,.wn-dot,.ping){animation:none !important}
+:root[data-motion="less"] :is(.btn.go::after,.newver::after){display:none}
+/* settings cards */
+.settings{max-width:880px;gap:16px}
+.settings > .card{padding:22px 24px;border:1px solid var(--line);border-radius:18px;background:var(--stone-2);display:grid;gap:16px;border-top:1px solid var(--line)}
+.settings > section.card:first-child{padding-top:22px;border-top:1px solid var(--line)}
+.card-h{display:flex;gap:14px;align-items:flex-start}
+.card-h h3{margin:0 0 3px}
+.card-h p{margin:0;color:var(--muted);font-size:13.5px;line-height:1.5}
+.card-ico{width:38px;height:38px;border-radius:11px;flex:none;display:grid;place-items:center;background:var(--accent-tint);color:var(--accent-2)}
+.card-ico svg{width:19px;height:19px}
+details.card > summary.card-h{font:inherit;cursor:pointer;list-style:none}
+details.card > summary.card-h::after{margin:12px 4px 0 auto}
+details.card:not([open]){gap:0}
+.ap-wrap{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start}
+.ap-opts{flex:1 1 420px;display:grid;gap:14px;min-width:0}
+.opt{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.opt-l{width:96px;flex:none;color:var(--muted);font-weight:600;font-size:13.5px}
+.opt .seg button{height:30px;padding:0 11px;font-size:13.5px}
+.range{display:flex;align-items:center;gap:12px;flex:1;max-width:330px}
+.range input{flex:1;accent-color:var(--accent);height:auto;padding:0;border:0;background:none}
+.range span{width:42px;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+.ap-side{flex:0 0 220px;display:grid;gap:10px;justify-items:center}
+.ap-prev{width:220px;height:146px;border-radius:14px;border:1px solid var(--line);overflow:hidden;display:flex;box-shadow:0 18px 40px -24px rgb(0 0 0 / calc(.9 * var(--shk)))}
+.pv-side{width:54px;padding:12px 8px;display:grid;gap:6px;align-content:start;background:rgb(var(--deep-rgb) / .55)}
+:root[data-side="solid"] .pv-side{background:var(--deep)}
+.pv-side i{height:7px;border-radius:3px;background:var(--stone-3)} .pv-side i.on{background:var(--accent)}
+.pv-main{flex:1;padding:14px 12px;display:grid;gap:7px;align-content:start}
+.pv-main b{height:11px;width:60%;border-radius:3px;background:var(--text);opacity:.85}
+.pv-main s{height:6px;width:85%;border-radius:3px;background:var(--muted);opacity:.5}
+.pv-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:4px}
+.pv-cards u{height:34px;border-radius:6px;background:color-mix(in srgb,var(--stone-2) 80%,transparent);border:1px solid var(--line)}
+.pv-main em{height:14px;width:46%;border-radius:4px;background:var(--accent);margin-top:4px}
+.sw.custom i{background:conic-gradient(#ff4d4d,#ffb84d,#f7ff4d,#4dff88,#4dd2ff,#7a4dff,#ff4dd2,#ff4d4d)}
+.sw.custom.on i{background:var(--sw)}
+.sw input[type=color]{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
+.sw{position:relative}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none !important;transition:none !important}}
 </style>
 </head>
@@ -5016,59 +5163,62 @@ details.adv[open] > *:not(summary){margin-top:14px}
         <p class="lede">Make ModHub look and work the way you like.</p>
       </div></div>
       <div class="settings">
-        <section>
-          <h3>Appearance</h3>
-          <div class="set-row"><span class="set-l">Mode</span>
-            <div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode">
-              <button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio">Match Windows</button>
-            </div></div>
-          <div class="set-row"><span class="set-l">Colour</span><div class="swatches" id="accentPick" role="radiogroup" aria-label="Colour theme"></div></div>
-        </section>
-        <section>
-          <h3>Updates</h3>
-          <p class="help" style="margin:-6px 0 0" id="updText"></p>
-          <button class="linkbtn hidden" id="updPeek" style="margin-top:6px"></button>
-          <div class="autoupd">
-            <label class="field-label" for="updSource">Get updates automatically from</label>
-            <div class="picker"><input id="updSource" placeholder="yourname/modhub (a GitHub repo)"><button class="btn" id="updSourceSave">Save</button></div>
-            <p class="help" id="updSourceStatus"></p>
-            <label class="check" style="margin-top:2px"><input type="checkbox" id="updAuto" checked> Install updates by itself when ModHub starts</label>
+        <section class="card" id="appearanceCard">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 1 0 0 20c1 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7H16a6 6 0 0 0 6-6C22 6 17.5 2 12 2z"/></svg></span><div><h3>Appearance</h3><p>Colours, background and how ModHub feels. Changes show straight away.</p></div></div>
+          <div class="ap-wrap">
+            <div class="ap-opts">
+              <div class="opt"><span class="opt-l">Mode</span><div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode"><button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio">Match Windows</button></div></div>
+              <div class="opt"><span class="opt-l">Colour</span><div class="swatches" id="accentPick" role="radiogroup" aria-label="Colour theme"></div></div>
+              <div class="opt"><span class="opt-l">Background</span><div class="seg optseg" data-opt="bg" role="radiogroup" aria-label="Background"><button data-v="gradient" role="radio">Gradient</button><button data-v="vivid" role="radio">Vivid</button><button data-v="glow" role="radio">Glow</button><button data-v="plain" role="radio">Plain</button></div></div>
+              <div class="opt" data-needs-bg><span class="opt-l">Direction</span><div class="seg optseg" data-opt="dir" role="radiogroup" aria-label="Gradient direction"><button data-v="top" role="radio">From the top</button><button data-v="corner" role="radio">From a corner</button><button data-v="side" role="radio">From the side</button><button data-v="bottom" role="radio">From the bottom</button></div></div>
+              <div class="opt" data-needs-bg><span class="opt-l">Strength</span><div class="range"><input type="range" id="bgStrength" min="10" max="100" step="1" aria-label="Background strength"><span id="bgStrengthVal"></span></div></div>
+              <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
+              <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
+              <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio">Small</button><button data-v="100" role="radio">Normal</button><button data-v="110" role="radio">Large</button><button data-v="120" role="radio">Larger</button></div></div>
+              <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+            </div>
+            <div class="ap-side">
+              <div class="ap-prev" aria-hidden="true"><div class="pv-side"><i></i><i class="on"></i><i></i><i></i></div><div class="pv-main"><b></b><s></s><div class="pv-cards"><u></u><u></u><u></u></div><em></em></div></div>
+              <button class="btn quiet sm" id="themeReset">Reset to default</button>
+            </div>
           </div>
+        </section>
+        <section class="card">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></span><div><h3>Updates</h3><p id="updText"></p></div></div>
+          <button class="linkbtn hidden" id="updPeek"></button>
+          <p class="help" id="updSourceStatus" style="margin:0"></p>
+          <label class="check" style="margin:0"><input type="checkbox" id="updAuto" checked> Install updates by itself when ModHub starts</label>
           <div class="actions">
             <button class="btn go hidden" id="updApply">Update now</button>
             <button class="btn" id="updCheck">Check for updates</button>
-            <button class="btn" id="updFile">Install from a file</button>
             <button class="btn quiet" id="updNotes">What's new</button>
+            <button class="btn quiet" id="updFile">Install from a file</button>
             <button class="btn quiet hidden" id="updUndo">Go back to the previous version</button>
           </div>
         </section>
-        <section>
-          <h3>Your library</h3>
-          <p class="help" style="margin:-6px 0 0">Save everything in one file: all your loadouts, the files you added yourself and your update setting. Restore it on another PC or after a reinstall. You can also drag a backup file onto ModHub.</p>
+        <section class="card">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg></span><div><h3>Your library</h3><p>Save all your loadouts and the files you added yourself in one backup file. Restore it on another PC or after a reinstall, or drag a backup onto ModHub.</p></div></div>
           <div class="actions">
             <button class="btn" id="bkSave">Save a backup</button>
             <label class="btn" style="cursor:pointer">Restore from a backup<input type="file" id="bkFile" accept=".zip" hidden></label>
           </div>
           <div id="bkOut"></div>
         </section>
-        <section>
-          <h3>App</h3>
-          <p class="help" style="margin:-6px 0 0" id="windowMode"></p>
+        <section class="card">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg></span><div><h3>App</h3><p id="windowMode"></p></div></div>
           <div id="windowActions"></div>
           <p class="help" style="margin:0" id="shortcutHelp"></p>
           <div><button class="btn" data-shortcut>Add shortcut</button></div>
         </section>
-        <details class="adv">
-          <summary>Launcher folders</summary>
-          <p class="help">ModHub finds these on its own. Change them only if you moved a launcher.</p>
+        <details class="card adv">
+          <summary class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><div><h3>Launcher folders</h3><p>ModHub finds these on its own. Change them only if you moved a launcher.</p></div></summary>
           <div><label class="field-label">Minecraft Launcher (.minecraft)</label><input data-path="official"></div>
           <div><label class="field-label">Prism Launcher data folder</label><input data-path="prism"></div>
           <div><label class="field-label">Modrinth App data folder</label><input data-path="modrinth_app"></div>
           <div class="actions"><button class="btn go" id="saveSettings">Save folders</button></div>
         </details>
-        <section class="about">
-          <h3>About</h3>
-          <p class="help" style="margin:-6px 0 0">ModHub <span id="aboutVer"></span>. Your library and settings are saved on this computer in <code class="inline" id="dataDir"></code>.</p>
+        <section class="card about">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg></span><div><h3>About</h3><p>ModHub <span id="aboutVer"></span>. Your library and settings are saved on this computer in <code class="inline" id="dataDir"></code>.</p></div></div>
           <p class="help" style="margin:0" id="quitHelp"></p>
           <div class="actions"><button class="btn quiet" id="aboutNotes">What's new</button><button class="btn quiet" id="quitBtn">Stop ModHub</button></div>
         </section>
@@ -5891,20 +6041,15 @@ function renderUpdateBits() {
     $("#updText").textContent = `ModHub ${u.version} is ready to install. It was found in your ${u.where} folder. You're on ${S.version}.`;
     $("#updApply").textContent = `Update to ${u.version}`;
   } else {
-    $("#updText").textContent = S.update_source
-      ? `You're on ModHub ${S.version}, the newest version.`
-      : `You're on ModHub ${S.version}. When you download a newer modhub.py, ModHub finds it in your Downloads folder and offers to update.`;
+    $("#updText").textContent = `You're on ModHub ${S.version}. New versions come straight from GitHub, with nothing to download.`;
   }
   const peek = $("#updPeek");
   peek.classList.toggle("hidden", !(u && u.changes && u.changes.length));
   if (u) peek.textContent = `See what's new in ${u.version}`;
   if (u && u.where === "online") $("#updText").textContent = `ModHub ${u.version} has been downloaded. ${S.update_auto ? "It installs by itself next time you open ModHub, or" : "You can"} update now.`;
-  if (document.activeElement !== $("#updSource")) $("#updSource").value = S.update_source || "";
   $("#updAuto").checked = S.update_auto !== false;
   const lc = S.update_last_check;
-  $("#updSourceStatus").innerHTML = !S.update_source
-    ? "Put modhub.py in a GitHub repo and ModHub keeps itself up to date, with nothing to download. Claude can set this up with you."
-    : !lc ? "Not checked yet."
+  $("#updSourceStatus").innerHTML = !lc ? "ModHub checks for updates every 6 hours."
     : lc.status === "error" ? `<span style="color:var(--missing)">Last check didn't work: ${esc(lc.message)}.</span>`
     : lc.status === "downloaded" ? `<span class="ok">Downloaded ModHub ${esc(lc.version)}.</span>`
     : `<span class="ok">Up to date.</span> Checked ${esc(timeAgo(lc.at))}. ModHub checks every 6 hours.`;
@@ -5917,15 +6062,6 @@ function timeAgo(iso) {
   if (d < 86400) return Math.round(d / 3600) + " hours ago";
   return Math.round(d / 86400) + " days ago";
 }
-$("#updSourceSave").onclick = async () => {
-  const b = $("#updSourceSave"); b.disabled = true; b.textContent = "Checking...";
-  try {
-    const r = await api("/api/update/source", {source: $("#updSource").value});
-    Object.assign(S, r); renderUpdateBits();
-    toast(!r.update_source ? "Automatic updates turned off" : r.check?.status === "error" ? "Saved, but the check didn't work" : r.update ? `ModHub ${r.update.version} is ready` : "Saved. You're up to date");
-  } catch (e) { toast(e.message); }
-  b.disabled = false; b.textContent = "Save";
-};
 $("#updAuto").onchange = async e => { Object.assign(S, await api("/api/update/auto", {on: e.target.checked})); renderUpdateBits(); };
 async function applyUpdate(path, version) {
   if (!confirm(`Update ModHub to ${version}? It will close and reopen by itself. Your library and settings stay as they are.`)) return;
@@ -5941,8 +6077,8 @@ $("#updCheck").onclick = async () => {
   const b = $("#updCheck"); b.disabled = true; b.textContent = "Checking...";
   try {
     const r = await api("/api/update/check");
-    S.update = r.update; renderUpdateBits();
-    toast(r.update ? `ModHub ${r.update.version} is ready to install` : "You're on the newest version you've downloaded");
+    S.update = r.update; if (r.update_last_check) S.update_last_check = r.update_last_check; renderUpdateBits();
+    toast(r.update ? `ModHub ${r.update.version} is ready to install` : r.update_last_check && r.update_last_check.status === "error" ? "Couldn't reach GitHub. Check your internet" : "You're on the newest version");
   } catch (e) { toast(e.message); }
   b.disabled = false; b.textContent = "Check for updates";
 };
@@ -5960,10 +6096,13 @@ $("#updUndo").onclick = async () => {
 };
 
 /* ---------- motion & polish ---------- */
-const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+let REDUCED = motionQuery.matches || document.documentElement.dataset.motion === "off";
+let LESS = REDUCED || document.documentElement.dataset.motion === "less";
+const uiZoom = () => parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
 const seenKeys = new WeakMap();
 function stagger(container, sel, onlyNew = false) {
-  if (!container || REDUCED) return;
+  if (!container || LESS) return;
   let seen = seenKeys.get(container);
   if (!seen) { seen = new Set(); seenKeys.set(container, seen); }
   let i = 0;
@@ -6001,12 +6140,12 @@ document.addEventListener("click", e => { if (e.target.closest(".seg button, .na
 let tilted = null;
 document.addEventListener("pointermove", e => {
   const card = e.target.closest(".lopt,.res,.folder,.frow,.port,.li,.newver");
-  if (card) {
-    const r = card.getBoundingClientRect();
-    card.style.setProperty("--mx", (e.clientX - r.left) + "px");
-    card.style.setProperty("--my", (e.clientY - r.top) + "px");
+  if (card && !LESS) {
+    const r = card.getBoundingClientRect(), z = uiZoom();
+    card.style.setProperty("--mx", (e.clientX - r.left) / z + "px");
+    card.style.setProperty("--my", (e.clientY - r.top) / z + "px");
   }
-  if (REDUCED) return;
+  if (LESS) { if (tilted) { tilted.style.transform = ""; tilted = null; } return; }
   const slot = e.target.closest(".cell:not(.ghost) .slot");
   if (tilted && tilted !== slot) { tilted.style.transform = ""; tilted = null; }
   if (slot) {
@@ -6020,7 +6159,7 @@ document.addEventListener("pointerleave", () => { if (tilted) { tilted.style.tra
 
 // a burst of little blocks when an install finishes
 function burst(fromEl) {
-  if (REDUCED || !fromEl) return;
+  if (LESS || !fromEl) return;
   const c = document.createElement("canvas");
   c.id = "burst"; c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio;
   document.body.appendChild(c);
@@ -6643,11 +6782,11 @@ async function liveDone() {
 // a soft ripple where you click a button
 document.addEventListener("pointerdown", e => {
   const b = e.target.closest(".btn");
-  if (!b || b.disabled || REDUCED) return;
-  const r = b.getBoundingClientRect(), size = Math.max(r.width, r.height) * 2.2;
+  if (!b || b.disabled || LESS) return;
+  const z = uiZoom(), r = b.getBoundingClientRect(), size = Math.max(r.width, r.height) * 2.2 / z;
   const rp = document.createElement("span");
   rp.className = "ripple";
-  Object.assign(rp.style, {width: size + "px", height: size + "px", left: (e.clientX - r.left - size / 2) + "px", top: (e.clientY - r.top - size / 2) + "px"});
+  Object.assign(rp.style, {width: size + "px", height: size + "px", left: ((e.clientX - r.left) / z - size / 2) + "px", top: ((e.clientY - r.top) / z - size / 2) + "px"});
   b.appendChild(rp); setTimeout(() => rp.remove(), 650);
 });
 
@@ -6679,7 +6818,8 @@ document.addEventListener("pointerover", e => {
     let x = r.left + r.width / 2 - tr.width / 2, y = r.top - tr.height - 10;
     if (y < 8) y = r.bottom + 10;
     x = Math.max(8, Math.min(innerWidth - tr.width - 8, x));
-    Object.assign(tip.style, {left: x + "px", top: y + "px"});
+    const z = uiZoom();
+    Object.assign(tip.style, {left: x / z + "px", top: y / z + "px"});
     tip.classList.add("on");
   }, 280);
 });
@@ -6840,8 +6980,10 @@ async function loadDiscover() {
     $("#discRetry").onclick = loadDiscover;
   }
 }
-function dcard(m, i, pick) {
-  return `<div class="dcard ${pick ? "pick" : ""}" data-dk="${i}" role="button" tabindex="0" aria-label="${esc(m.name)}">
+function dcard(m, i, pick, shots) {
+  const art = safeUrl(m.icon) ? `<img class="blur" src="${esc(m.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : "";
+  return `<div class="dcard ${shots ? "has-shot" : ""} ${pick ? "pick" : ""}" data-dk="${i}" role="button" tabindex="0" aria-label="${esc(m.name)}">
+    ${shots ? "" : "<!--"}<div class="shot ${safeUrl(m.shot) ? "" : "empty"}">${safeUrl(m.shot) ? `<img src="${esc(m.shot)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('empty');this.remove()">` : art}</div>${shots ? "" : "-->"}
     <div class="top">${ico(m)}<div style="min-width:0"><div class="nm">${esc(m.name)}</div><div class="by">${m.author ? "by " + esc(m.author) : "Modrinth"}</div></div></div>
     ${pick && m.why ? `<div class="why">${esc(m.why)}</div>` : `<div class="ds">${esc(m.desc)}</div>`}
     <div class="ft"><span>${fmt(m.downloads)} downloads</span>${isFav(m) ? `<span class="added"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M2 7.5l3 3 7-7"/></svg>In library</span>` : `<button class="btn sm go" data-dadd>Add</button>`}</div>
@@ -6851,7 +6993,11 @@ function renderDiscover() {
   const d = discData; if (!d) return;
   const v = esc($("#discVer").value), K = {mod: "mods", resourcepack: "resource packs", shader: "shaders"}[discKind];
   const all = [];
-  const sec = (title, small, list, pick) => list && list.length ? `<div class="disc-sec"><h3>${title}<small>${small}</small></h3><div class="dgrid">${list.map(m => { all.push(m); return dcard(m, all.length - 1, pick); }).join("")}</div></div>` : "";
+  const sec = (title, small, list, pick) => {
+    if (!list || !list.length) return "";
+    const shots = list.filter(m => safeUrl(m.shot)).length >= list.length / 2;
+    return `<div class="disc-sec"><h3>${title}<small>${small}</small></h3><div class="dgrid">${list.map(m => { all.push(m); return dcard(m, all.length - 1, pick, shots); }).join("")}</div></div>`;
+  };
   const ids = new Set((d.popular || []).map(m => m.id));
   let h = sec("Goes with your library", "Picked for what you already have", d.picks, true)
         + sec(`Popular for ${v}`, `The most followed ${K} that are out for ${v}`, d.popular)
@@ -6899,6 +7045,7 @@ async function openModPage(m) {
     if (seq === mpSeq) $("#mpBody").innerHTML = `<div class="mp-head"><div class="grow"><h2 id="mpTitle">${esc(m.name)}</h2></div></div><div style="padding:0 30px 30px"><div class="banner err" style="margin:0"><div class="grow"><b>Couldn't load this page</b><p>${esc(e.message)}</p></div></div><div class="foot"><button class="btn" data-close>Close</button></div></div>`;
   }
 }
+function fallBack(img, url) { if (img && url) img.onerror = () => { img.onerror = null; if (img.src !== url) img.src = url; }; }
 function renderModPage(p, ctx) {
   const fav = isFav(p), kind = p.kind || "mod", v = esc(ctx.version || "");
   const ldr = kind === "mod" ? ` with ${LOADER_LABEL[ctx.loader] || ""}` : "";
@@ -6908,8 +7055,10 @@ function renderModPage(p, ctx) {
   const body = plainBody(p.body);
   const short = body.length > 4000 ? body.slice(0, 4000).replace(/\s+\S*$/, "") + "..." : body;
   const links = Object.entries(p.links || {}).map(([k, u]) => `<a class="mp-chip" href="${esc(u)}" target="_blank" rel="noopener">${{source_url: "Source code", issues_url: "Report a bug", wiki_url: "Wiki", discord_url: "Discord"}[k]}</a>`).join("");
+  const hero = p.gallery[0];
   $("#mpBody").innerHTML = `
-    <div class="mp-head">${ico(p)}
+    ${hero ? `<div class="mp-banner" data-zoom="0"><img src="${esc(hero.full || hero.url)}" alt="${esc(hero.title)}" decoding="async" referrerpolicy="no-referrer"></div>` : ""}
+    <div class="mp-head ${hero ? "on-banner" : ""}">${ico(p)}
       <div class="grow"><h2 id="mpTitle">${esc(p.name)}</h2><div class="sub">${esc(p.desc)}</div>${p.author ? `<div class="help" style="margin-top:4px">by ${esc(p.author)}</div>` : ""}</div>
     </div>
     <div class="mp-acts" style="padding:0 30px 18px">
@@ -6918,7 +7067,7 @@ function renderModPage(p, ctx) {
       <button class="btn quiet" data-close style="margin-left:auto">Close</button>
     </div>
     ${status}
-    ${p.gallery.length ? `<div class="mp-gal">${p.gallery.map(g => `<img src="${esc(g.url)}" alt="${esc(g.title)}" loading="lazy" referrerpolicy="no-referrer" data-zoom>`).join("")}</div>` : ""}
+    ${p.gallery.length > 1 ? `<div class="mp-gal">${p.gallery.slice(1).map((g, i) => `<img src="${esc(g.url)}" alt="${esc(g.title)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" data-zoom="${i + 1}">`).join("")}</div>` : ""}
     <div class="mp-grid">
       <div class="mp-body">${body ? mdLite(short).replace("<div>No notes for this update.</div>", "") : `<p>${esc(p.desc)}</p>`}
         ${body.length > 4000 && safeUrl(p.url) ? `<p style="margin-top:12px"><a href="${esc(p.url)}" target="_blank" rel="noopener">Read the full description on Modrinth</a></p>` : ""}</div>
@@ -6936,35 +7085,68 @@ function renderModPage(p, ctx) {
   $("#mpBody").scrollTop = 0;
   if ($("#mpAdd")) $("#mpAdd").onclick = async () => { if (await addToLibrary(p, $("#mpAdd"))) renderModPage(p, ctx); };
   $$("#mpBody [data-need]").forEach(b => b.onclick = () => openModPage(p.needs[+b.dataset.need]));
-  $$("#mpBody [data-zoom]").forEach(img => img.onclick = () => {
-    const z = document.createElement("div"); z.className = "mp-zoom"; z.innerHTML = `<img src="${esc(img.src)}" alt="${esc(img.alt)}" referrerpolicy="no-referrer">`;
+  if (hero) fallBack($(".mp-banner img"), hero.url);
+  $$("#mpBody [data-zoom]").forEach(el => el.onclick = () => {
+    const g = p.gallery[+el.dataset.zoom]; if (!g) return;
+    const z = document.createElement("div"); z.className = "mp-zoom";
+    z.innerHTML = `<img src="${esc(g.full || g.url)}" alt="${esc(g.title)}" referrerpolicy="no-referrer">${g.title ? `<span>${esc(g.title)}</span>` : ""}`;
+    fallBack(z.querySelector("img"), g.url);
     z.onclick = () => z.remove(); document.body.appendChild(z);
   });
 }
 
 /* ---------- themes ---------- */
-const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["emerald", "Emerald", "#0e9e5a"], ["ocean", "Ocean", "#2563eb"], ["violet", "Violet", "#7c3aed"], ["amber", "Amber", "#ca7008"], ["rose", "Rose", "#d62976"]];
+const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["rose", "Rose", "#d62976"], ["violet", "Violet", "#7c3aed"], ["ocean", "Ocean", "#2563eb"], ["emerald", "Emerald", "#0e9e5a"], ["amber", "Amber", "#ca7008"]];
+const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "full"};
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
+function accentTriplets(hex) {
+  const n = parseInt(hex.slice(1), 16), c = [n >> 16 & 255, n >> 8 & 255, n & 255];
+  const mix = (w, k) => c.map(v => Math.round(v + (w - v) * k)).join(" ");
+  return [c.join(" "), mix(255, .18), mix(0, .28)];
+}
 function applyTheme(t, animate = false) {
+  t = {...THEME_DEFAULT, ...t};
   const d = document.documentElement;
   if (animate && !REDUCED) { d.classList.add("theming"); setTimeout(() => d.classList.remove("theming"), 420); }
-  d.dataset.pref = t.mode; d.dataset.accent = t.accent;
+  Object.assign(d.dataset, {pref: t.mode, accent: t.accent, bg: t.bg, dir: t.dir, radius: t.radius, side: t.side, motion: t.motion});
   d.dataset.mode = t.mode === "system" ? (lightQuery.matches ? "light" : "dark") : t.mode;
+  d.style.setProperty("--bgk", (t.strength / 100).toFixed(2));
+  d.style.setProperty("--ui-zoom", (+t.size / 100).toFixed(2));
+  if (t.accent === "custom") { const [a, b, c] = accentTriplets(t.custom); d.style.setProperty("--acc", a); d.style.setProperty("--acc2", b); d.style.setProperty("--acc3", c); }
+  else ["--acc", "--acc2", "--acc3"].forEach(v => d.style.removeProperty(v));
+  REDUCED = motionQuery.matches || t.motion === "off";
+  LESS = REDUCED || t.motion === "less";
+  if (typeof settle === "function") { settle(); setTimeout(settle, 60); }
 }
 lightQuery.addEventListener("change", () => { if (S && S.theme && S.theme.mode === "system") applyTheme(S.theme, true); });
 function renderTheme() {
-  const t = S.theme || {mode: "dark", accent: "crimson"};
+  const t = {...THEME_DEFAULT, ...(S.theme || {})};
   $$("#themeMode button").forEach(b => { b.classList.toggle("on", b.dataset.mode === t.mode); b.setAttribute("aria-checked", b.dataset.mode === t.mode); });
-  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}"><i></i>${n}</button>`).join("");
+  $$("[data-opt]").forEach(g => g.querySelectorAll("button").forEach(b => { const on = String(t[g.dataset.opt]) === b.dataset.v; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); }));
+  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}"><i></i>${n}</button>`).join("")
+    + `<label class="sw custom ${t.accent === "custom" ? "on" : ""}" style="--sw:${t.custom}" title="Pick any colour"><i></i>Custom<input type="color" id="customColor" value="${t.custom}" aria-label="Custom colour"></label>`;
   $$("#accentPick [data-accent]").forEach(b => b.onclick = () => setTheme({accent: b.dataset.accent}));
+  const cc = $("#customColor");
+  cc.oninput = () => { const v = cc.value; cc.parentElement.style.setProperty("--sw", v); S.theme = {...t, accent: "custom", custom: v}; applyTheme(S.theme); $$("#accentPick .sw").forEach(x => x.classList.toggle("on", x.classList.contains("custom"))); };
+  cc.onchange = () => setTheme({accent: "custom", custom: cc.value});
+  $("#bgStrength").value = t.strength; $("#bgStrengthVal").textContent = t.strength + "%";
+  $$("[data-needs-bg]").forEach(r => r.classList.toggle("hidden", t.bg === "plain"));
   settle();
 }
-async function setTheme(patch) {
-  S.theme = {...(S.theme || {mode: "dark", accent: "crimson"}), ...patch};
-  applyTheme(S.theme, true); renderTheme();
-  try { S.theme = (await api("/api/theme", patch)).theme; } catch (e) { toast(e.message); }
+let themeSave;
+async function setTheme(patch, quiet = false) {
+  S.theme = {...THEME_DEFAULT, ...(S.theme || {}), ...patch};
+  applyTheme(S.theme, !quiet); renderTheme();
+  clearTimeout(themeSave);
+  themeSave = setTimeout(async () => { try { S.theme = (await api("/api/theme", patch)).theme; } catch (e) { toast(e.message); } }, quiet ? 250 : 0);
 }
 $$("#themeMode button").forEach(b => b.onclick = () => setTheme({mode: b.dataset.mode}));
+$$("[data-opt]").forEach(g => g.addEventListener("click", e => { const b = e.target.closest("button[data-v]"); if (b) setTheme({[g.dataset.opt]: g.dataset.opt === "strength" ? +b.dataset.v : b.dataset.v}); }));
+$("#bgStrength").oninput = e => { const v = +e.target.value; $("#bgStrengthVal").textContent = v + "%"; document.documentElement.style.setProperty("--bgk", (v / 100).toFixed(2)); };
+$("#bgStrength").onchange = e => setTheme({strength: +e.target.value}, true);
+$("#themeReset").onclick = async () => {
+  try { S.theme = (await api("/api/theme", {reset: true})).theme; applyTheme(S.theme, true); renderTheme(); toast("Appearance reset"); } catch (e) { toast(e.message); }
+};
 
 function renderAll() { renderTheme(); renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
