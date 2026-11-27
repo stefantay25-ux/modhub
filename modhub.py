@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
@@ -67,6 +67,7 @@ PORT_TASK_FILE = "MODHUB_PORT_TASK.md"
 PORT_OUTPUT = "modhub-output"
 CLAUDE_PROMPT = "Read MODHUB_PORT_TASK.md in this folder and do the port it describes."
 MANIFEST_NAME = ".modhub.json"
+VERSIONS_NAME = ".modhub-versions.json"
 
 try:
     sys.stdout.reconfigure(errors="replace")
@@ -387,6 +388,7 @@ class Job:
         self.error = None
         self.result = None
         self.changes = []
+        self.updates = []
 
     def log(self, msg):
         self.lines.append(msg)
@@ -495,7 +497,7 @@ def resolve(job, favorites, gv, loader, ports=None):
         if not f:
             it["status"] = "not_ready"
             continue
-        it.update(status="ready", version=v.get("version_number", ""),
+        it.update(status="ready", version=v.get("version_number", ""), changelog=(v.get("changelog") or "")[:4000],
                   file={"url": f["url"], "filename": f["filename"], "sha1": (f.get("hashes") or {}).get("sha1")})
         if it["kind"] == "mod":
             for d in v.get("dependencies") or []:
@@ -582,11 +584,19 @@ def _place(job, folder: Path, items, managed, progress):
         except Exception:
             manifest = {}
     placed = []
+    vpath = folder / VERSIONS_NAME
+    versions = {}
+    if managed:
+        try:
+            versions = json.loads(vpath.read_text("utf-8"))
+        except Exception:
+            versions = {}
     for n, it in enumerate(items, 1):
         job.progress = progress[0] + (progress[1] - progress[0]) * n / max(len(items), 1)
         f = it["file"]
         target = folder / f["filename"]
         old = manifest.get(it["key"])
+        prev = versions.get(it["key"])
         if f.get("local"):
             src = Path(f["local"])
             label = "your port" if it.get("ported") else "your file"
@@ -604,6 +614,11 @@ def _place(job, folder: Path, items, managed, progress):
             try:
                 download(f["url"], target, f.get("sha1"))
                 job.changes.append(it["name"])
+                if (old and old != f["filename"]) or (prev and prev != it["version"]):
+                    job.updates.append({"key": it["key"], "name": it["name"], "icon": it.get("icon", ""),
+                                        "url": it.get("url", ""), "kind": it.get("kind", "mod"),
+                                        "from": prev or re.sub(r"\.(jar|zip)$", "", old or ""), "to": it["version"],
+                                        "changelog": it.get("changelog", "")})
             except Exception as e:
                 it["status"] = "failed"
                 it["notes"].append(f"download failed: {e}")
@@ -613,7 +628,14 @@ def _place(job, folder: Path, items, managed, progress):
             (folder / old).unlink()
             job.log(f"    removed older copy {old}")
         manifest[it["key"]] = f["filename"]
+        if it.get("version") and not f.get("local"):
+            versions[it["key"]] = it["version"]
         placed.append((it, target))
+    if managed:
+        try:
+            vpath.write_text(json.dumps(versions, indent=2), "utf-8")
+        except OSError:
+            pass
     return manifest, mpath, placed
 
 
@@ -1324,6 +1346,101 @@ def copy_settings(src: Path, dst: Path, log=print):
 
 
 # =========================================================================== #
+# Back up and move your library
+# =========================================================================== #
+BACKUP_MARKER = "modhub-backup.json"
+
+
+def save_library_backup():
+    """One file with your loadouts, the files you added yourself and your update setting."""
+    with CFG_LOCK:
+        loadouts = json.loads(json.dumps(CFG["loadouts"]))
+        data = {"format": 1, "app": "ModHub", "app_version": APP_VERSION, "created": now_iso(),
+                "loadouts": loadouts, "active_loadout": CFG.get("active_loadout"),
+                "settings": {k: CFG.get(k) for k in ("update_source", "update_auto", "loader") if CFG.get(k) is not None}}
+    own = {}
+    for lo in loadouts.values():
+        for f in lo["favorites"]:
+            if f.get("source") == "local" and re.fullmatch(r"[\w-]+", str(f["id"])):
+                own[str(f["id"])] = [x["file"] for x in f.get("files", [])]
+    home = Path.home()
+    out_dir = next((d for d in (home / "Downloads", home / "Desktop") if d.is_dir()), EXPORT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = f"ModHub-backup-{datetime.now():%Y-%m-%d}"
+    out = out_dir / f"{base}.zip"
+    n = 2
+    while out.exists():
+        out = out_dir / f"{base}-{n}.zip"
+        n += 1
+    files = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(BACKUP_MARKER, json.dumps(data, indent=2))
+        for iid, names in own.items():
+            for name in names:
+                f = LOCAL_DIR / iid / name
+                if f.is_file():
+                    z.write(f, f"files/{iid}/{name}")
+                    files += 1
+    OPENABLE.add(str(out))
+    items = sum(len(lo["favorites"]) for lo in loadouts.values())
+    return {"path": str(out), "file": out.name, "where": out_dir.name, "loadouts": len(loadouts), "items": items, "files": files}
+
+
+def restore_library_backup(path: Path):
+    """Add a backup to this ModHub. Nothing is removed: loadouts with the same name are merged."""
+    try:
+        z = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        raise UserError("That isn't a ModHub backup file.")
+    with z:
+        if BACKUP_MARKER not in z.namelist():
+            raise UserError("That isn't a ModHub backup file.")
+        try:
+            data = json.loads(z.read(BACKUP_MARKER).decode("utf-8"))
+        except Exception:
+            raise UserError("That backup file is damaged.")
+        if data.get("app") != "ModHub" or not isinstance(data.get("loadouts"), dict):
+            raise UserError("That isn't a ModHub backup file.")
+        # your own files first, so the library entries that point at them work straight away
+        files = 0
+        for name in z.namelist():
+            m = re.fullmatch(r"files/([\w-]+)/([^/\\]+)", name)
+            if not m or not m.group(2).lower().endswith((".jar", ".zip")):
+                continue
+            target = LOCAL_DIR / m.group(1) / m.group(2)
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            files += 1
+    added_lo, merged_lo, items = [], [], 0
+    with CFG_LOCK:
+        for lo in data["loadouts"].values():
+            name = (lo.get("name") or "Restored").strip()[:40]
+            favs = [f for f in lo.get("favorites") or [] if isinstance(f, dict) and f.get("source") in ("modrinth", "local") and f.get("id")]
+            mine = next((v for v in CFG["loadouts"].values() if v["name"].lower() == name.lower()), None)
+            if mine is None:
+                CFG["loadouts"][uuid.uuid4().hex[:8]] = {"name": name, "favorites": favs}
+                added_lo.append(name)
+                items += len(favs)
+            else:
+                have = {(f["source"], str(f["id"])) for f in mine["favorites"]}
+                new = [f for f in favs if (f["source"], str(f["id"])) not in have]
+                mine["favorites"].extend(new)
+                items += len(new)
+                if new:
+                    merged_lo.append(name)
+        st = data.get("settings") or {}
+        if st.get("update_source") and not CFG.get("update_source"):
+            CFG["update_source"] = st["update_source"]
+        CFG["favorites"] = CFG["loadouts"][CFG["active_loadout"]]["favorites"]
+        save_config(CFG)
+    return {"loadouts_added": added_lo, "loadouts_merged": merged_lo, "items": items, "files": files,
+            "from": data.get("created", "")[:10]}
+
+
+# =========================================================================== #
 # Launchers
 # =========================================================================== #
 def official_prepare(ctx):
@@ -1555,6 +1672,7 @@ def install_job(job, req, remember=True):
            "folder": req.get("folder"), "log": job.log}
 
     job.log(f"Installing {lname} for Minecraft {gv} ({loader}) -> {L['name']}")
+    u0 = len(job.updates)  # this install's own changes (Update all runs several in one job)
     items = resolve(job, favorites, gv, loader, cfg.get("ports") or {})
     for it in items:
         if it["key"] in (req.get("skip") or []):
@@ -1582,16 +1700,16 @@ def install_job(job, req, remember=True):
         OPENABLE.add(str(ctx["open"]))
     added = sum(1 for i in items if i["status"] == "ready")
     job.log(f"Done! {added} installed.")
-    install_id = record_install(req, ctx, lid, lname, mods_dir, export=bool(L["finish"]), items=items)
+    install_id = record_install(req, ctx, lid, lname, mods_dir, export=bool(L["finish"]), items=items, updates=job.updates[u0:])
     return {"items": items, "message": ctx.get("message", ""), "open": str(ctx.get("open") or ""),
             "changes": job.changes, "install_id": install_id, "problems": problems, "export": bool(L["finish"]),
-            "brought": brought}
+            "brought": brought, "updates": job.updates[u0:]}
 
 
 # =========================================================================== #
 # Instances ModHub installed, keeping them updated, and watching for mods that catch up
 # =========================================================================== #
-def record_install(req, ctx, lid, lname, mods_dir, export, items):
+def record_install(req, ctx, lid, lname, mods_dir, export, items, updates=None):
     launcher = ctx["launcher"]
     folder = (req.get("folder") or "").strip()
     iid = f"{launcher}:{folder.lower() if LAUNCHERS[launcher].get('folder') else ctx['name'].lower()}"
@@ -1607,6 +1725,12 @@ def record_install(req, ctx, lid, lname, mods_dir, export, items):
         old = next((r for r in installs if r["id"] == iid), None)
         rec["installed"] = old.get("installed", now) if old else now
         rec["disabled"] = (old or {}).get("disabled", [])
+        if updates:  # remember the latest round of changes for "What changed"
+            rec["last_changes"] = [dict(u, changelog=(u.get("changelog") or "")[:1500]) for u in updates][:40]
+            rec["changes_at"] = now
+        elif old:
+            rec["last_changes"] = old.get("last_changes", [])
+            rec["changes_at"] = old.get("changes_at")
         installs[:] = [r for r in installs if r["id"] != iid] + [rec]
         # watch what isn't out yet; stop watching what is
         watch = CFG.setdefault("watch", {})
@@ -1691,7 +1815,7 @@ def update_all_job(job):
         try:
             res = install_job(job, install_request(rec), remember=False)
             summary.append({"name": rec["name"], "changes": job.changes[before:], "install_id": rec["id"],
-                            "problems": res.get("problems") or []})
+                            "problems": res.get("problems") or [], "updates": res.get("updates") or []})
         except UserError as e:
             summary.append({"name": rec["name"], "error": str(e)})
         job.progress = n / len(recs)
@@ -2830,6 +2954,8 @@ def api(path, body):
         return state()
     if path == "/api/watch/check":
         return {"found": check_watched(), **{k: v for k, v in state().items() if k in ("caught_up", "watching")}}
+    if path == "/api/backup/save":
+        return save_library_backup()
     if path == "/api/perf":
         return {"mods": perf_list(body.get("loader"), (body.get("version") or "").strip() or None)}
     if path == "/api/perf/add":
@@ -3053,6 +3179,16 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         out.write(chunk)
                         left -= len(chunk)
+                restore = urllib.parse.urlparse(self.path).path == "/api/backup/restore"
+                if not restore and name.lower().endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(tmp) as zz:
+                            restore = BACKUP_MARKER in zz.namelist()
+                    except zipfile.BadZipFile:
+                        pass
+                if restore:
+                    result = restore_library_backup(Path(tmp))
+                    return self._send(200, {"restored": result, **state()})
                 want = (qs.get("version") or [None])[0]
                 res = add_local_file(Path(tmp), name, want, (qs.get("item") or [None])[0], explicit_version=bool(want))
             finally:
@@ -3082,7 +3218,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_ok() or self.headers.get("X-Token") != TOKEN:
             return self._send(403, {"error": "forbidden"})
-        if urllib.parse.urlparse(self.path).path == "/api/local/upload":
+        if urllib.parse.urlparse(self.path).path in ("/api/local/upload", "/api/backup/restore"):
             return self._upload()
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -3993,6 +4129,20 @@ details.more > summary:hover{color:var(--text)}
 .pmod .tag{flex:none}
 .carry{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid #24242a}
 .carry select{width:auto;min-width:260px;height:36px}
+.chg{padding:14px 0;border-top:1px solid var(--stone-3)}
+.chg:first-of-type{border-top:0}
+.chg-h{display:flex;align-items:center;gap:12px}
+.chg-h .grow{flex:1;min-width:0}
+.chg-h b{display:block}
+.chg-h .vv{color:var(--muted);font-size:13px}
+.chg-h .vv span{color:var(--ready);font-weight:650}
+.cl{margin:10px 0 0 46px;color:var(--muted);font-size:13.5px;line-height:1.55;max-height:9.5em;overflow:hidden;position:relative}
+.cl.open{max-height:none}
+.cl:not(.open)::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.5em;background:linear-gradient(transparent,var(--stone))}
+.cl ul{margin:4px 0;padding-left:18px}
+.cl b{color:var(--text)}
+.cl code{background:var(--deep);padding:0 5px;border-radius:4px;font-size:12.5px}
+.cl-more{margin:4px 0 0 46px}
 .catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid #23402f}
 .catch .grow{flex:1;min-width:0}
 .catch b{display:block}
@@ -4396,6 +4546,15 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
           <div><label class="field-label">Modrinth App data folder</label><input data-path="modrinth_app"></div>
         </section>
         <section>
+          <h3>Your library</h3>
+          <p class="help" style="margin:-6px 0 0">Save everything in one file: all your loadouts, the files you added yourself and your update setting. Restore it on another PC or after a reinstall. You can also drag a backup file onto ModHub.</p>
+          <div class="actions">
+            <button class="btn" id="bkSave">Save a backup</button>
+            <label class="btn" style="cursor:pointer">Restore from a backup<input type="file" id="bkFile" accept=".zip" hidden></label>
+          </div>
+          <div id="bkOut"></div>
+        </section>
+        <section>
           <h3>Updates</h3>
           <p class="help" style="margin:-6px 0 0" id="updText"></p>
           <div class="autoupd">
@@ -4455,6 +4614,11 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
 <!-- performance boost modal -->
 <div class="scrim hidden" id="boostModal" role="dialog" aria-modal="true" aria-labelledby="boostTitle">
   <div class="modal" id="boostBody"></div>
+</div>
+
+<!-- what changed -->
+<div class="scrim hidden" id="chgModal" role="dialog" aria-modal="true" aria-labelledby="chgTitle">
+  <div class="modal" id="chgBody" style="width:min(680px,100%)"></div>
 </div>
 
 <!-- problems popup -->
@@ -4791,6 +4955,12 @@ async function uploadFiles(files) {
       const r = await fetch("/api/local/upload" + qs, {method: "POST", headers: {"X-Token": T, "X-Filename": encodeURIComponent(file.name)}, body: file});
       const j = await r.json().catch(() => ({error: r.statusText}));
       if (!r.ok) throw new Error(j.error || r.statusText);
+      if (j.restored) {
+        const {restored, ...st} = j; S = st; renderAll();
+        row.innerHTML = `<div class="body"><div class="t">${esc(file.name)}</div><div class="s" style="color:var(--ready)">Restored your library from this backup. Nothing was removed.</div></div>`;
+        showRestored(restored);
+        continue;
+      }
       S.favorites = j.favorites;
       const it = j.item, v = j.version || "unknown";
       row.innerHTML = `${ico(it)}<div class="body"><div class="t">${esc(it.name)}</div><div class="s">${KIND_LABEL[it.kind] || "Mod"}, ${esc(j.file)}</div></div>
@@ -5446,6 +5616,7 @@ function renderInstances() {
       <div class="actions">
         ${r.export ? `<button class="btn" data-iup="${esc(r.id)}">Build a fresh pack</button>` : `<button class="btn go" data-iup="${esc(r.id)}">Update</button>`}
         ${r.export ? "" : `<button class="btn" data-icheck="${esc(r.id)}">Check for problems</button>`}
+        ${(r.last_changes || []).length ? `<button class="btn quiet" data-ichg="${esc(r.id)}">What changed</button>` : ""}
         ${r.open ? `<button class="btn quiet" data-iopen="${esc(r.open)}">Show folder</button>` : ""}
         <button class="btn quiet" data-irm="${esc(r.id)}">Remove from list</button>
       </div>
@@ -5455,6 +5626,7 @@ function renderInstances() {
   stagger($("#instList"), ".inst");
   $$("[data-iup]").forEach(b => b.onclick = () => updateInstance(b.dataset.iup, b));
   $$("[data-icheck]").forEach(b => b.onclick = () => checkInstance(b.dataset.icheck, b));
+  $$("[data-ichg]").forEach(b => b.onclick = () => { const r = (S.installs || []).find(x => x.id === b.dataset.ichg); if (r) showChanges(r.last_changes, `What changed in ${r.name}` + (r.changes_at ? ` (${timeAgo(r.changes_at)})` : "")); });
   $$("[data-iopen]").forEach(b => b.onclick = () => api("/api/open", {path: b.dataset.iopen}).catch(e => toast(e.message)));
   $$("[data-irm]").forEach(b => b.onclick = async () => {
     if (!confirm("Remove this from the list? Its files stay where they are.")) return;
@@ -5474,7 +5646,11 @@ async function updateInstance(id, btn) {
     const res = await follow(job, v => { if (v.lines.length) out.textContent = v.lines[v.lines.length - 1].trim(); });
     out.innerHTML = changesText(res.changes);
     S = await api("/api/state"); renderInstances();
-    const again = $(`.inst[data-inst="${CSS.escape(id)}"] [data-iout]`); if (again) again.innerHTML = changesText(res.changes);
+    const again = $(`.inst[data-inst="${CSS.escape(id)}"] [data-iout]`);
+    if (again) {
+      again.innerHTML = changesText(res.changes) + ((res.updates || []).length ? ` <button class="linkbtn" data-seechg>See what changed</button>` : "");
+      const sc = again.querySelector("[data-seechg]"); if (sc) sc.onclick = () => showChanges(res.updates, `What changed in ${res.instance}`);
+    }
     const rec = (S.installs || []).find(r => r.id === id) || {};
     showProblems(res.problems, {instanceId: id, export: rec.export, name: rec.name});
     if (res.changes.length) burst($(`.inst[data-inst="${CSS.escape(id)}"] [data-iup]`));
@@ -5494,6 +5670,11 @@ $("#updAll").onclick = async () => {
     $("#instAllOut").innerHTML = `<div class="banner" style="margin:0 0 18px"><div class="grow"><b>${total ? `Updated ${total} ${total === 1 ? "item" : "items"}` : "Everything was already up to date"}</b>
       <p>${res.summary.map(x => `${esc(x.name)}: ${x.error ? `<span style="color:var(--missing)">${esc(x.error)}</span>` : (x.changes.length ? esc([...new Set(x.changes)].join(", ")) : "up to date")}`).join("<br>")}</p></div></div>`;
     S = await api("/api/state"); renderInstances();
+    const allUpdates = res.summary.flatMap(x => x.updates || []);
+    if (allUpdates.length) {
+      $("#instAllOut .banner").insertAdjacentHTML("beforeend", `<button class="btn sm" id="allChg">See what changed</button>`);
+      $("#allChg").onclick = () => showChanges(allUpdates, "What changed");
+    }
     const withProblems = res.summary.find(x => (x.problems || []).length);
     if (withProblems) showProblems(withProblems.problems, {instanceId: withProblems.install_id, name: withProblems.name});
     else if (total) burst(b);
@@ -5686,6 +5867,77 @@ async function loadCarry() {
   } catch (e) { $("#carryBlock").classList.add("hidden"); }
 }
 $("#carryOn").onchange = () => { $("#carryFrom").disabled = !$("#carryOn").checked; };
+
+/* ---------- what changed ---------- */
+function mdLite(text) {
+  // a tiny, safe subset of Markdown for changelogs
+  const lines = esc(text || "").replace(/\r/g, "").split("\n");
+  let html = "", inList = false;
+  for (let raw of lines) {
+    let l = raw.trim();
+    if (!l || /^!\[/.test(l) || /^-{3,}$/.test(l)) { if (inList) { html += "</ul>"; inList = false; } continue; }
+    l = l.replace(/\[([^\]]+)\]\((?:[^)]+)\)/g, "$1").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/__([^_]+)__/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+    const li = l.match(/^[-*+]\s+(.*)/);
+    if (li) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${li[1]}</li>`; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    const h = l.match(/^#{1,6}\s+(.*)/);
+    html += h ? `<div><b>${h[1]}</b></div>` : `<div>${l}</div>`;
+  }
+  return (inList ? html + "</ul>" : html) || "<div>No notes for this update.</div>";
+}
+function showChanges(updates, title) {
+  if (!updates || !updates.length) return false;
+  const seen = new Map();
+  updates.forEach(u => { if (!seen.has(u.key)) seen.set(u.key, u); });
+  const list = [...seen.values()];
+  $("#chgBody").innerHTML = `
+    <h2 id="chgTitle">${esc(title || "What changed")}</h2>
+    <p class="lede">${list.length} ${list.length === 1 ? "item was" : "items were"} updated. Here's what their authors say is new.</p>
+    <div style="margin-top:8px">${list.map((u, i) => `
+      <div class="chg"><div class="chg-h">${ico(u)}<div class="grow"><b>${safeUrl(u.url) ? `<a href="${esc(u.url)}" target="_blank" rel="noopener" style="color:inherit">${esc(u.name)}</a>` : esc(u.name)}</b>
+        <div class="vv">${u.from ? esc(u.from) + " to " : ""}<span>${esc(u.to)}</span></div></div></div>
+        <div class="cl" id="cl${i}">${mdLite(u.changelog)}</div>
+        <button class="linkbtn cl-more hidden" data-more="${i}">Show more</button></div>`).join("")}</div>
+    <div class="foot"><button class="btn go" data-close>Done</button></div>`;
+  openModal("#chgModal");
+  requestAnimationFrame(() => list.forEach((u, i) => {
+    const el = $("#cl" + i);
+    if (el.scrollHeight > el.clientHeight + 4) $(`[data-more="${i}"]`).classList.remove("hidden"); else el.classList.add("open");
+  }));
+  $$("#chgBody [data-more]").forEach(b => b.onclick = () => { $("#cl" + b.dataset.more).classList.toggle("open"); b.textContent = b.textContent === "Show more" ? "Show less" : "Show more"; });
+  return true;
+}
+
+/* ---------- library backups ---------- */
+$("#bkSave").onclick = async () => {
+  const b = $("#bkSave"); b.disabled = true;
+  try {
+    const r = await api("/api/backup/save");
+    $("#bkOut").innerHTML = `<div class="banner" style="margin-top:12px"><div class="grow"><b>Saved ${esc(r.file)}</b><p>In your ${esc(r.where)} folder: ${r.loadouts} ${r.loadouts === 1 ? "loadout" : "loadouts"}, ${r.items} items and ${r.files} of your own files. Copy it to your other PC, then Restore it there.</p></div><button class="btn sm" id="bkShow">Show in folder</button></div>`;
+    $("#bkShow").onclick = () => api("/api/open", {path: r.path}).catch(e => toast(e.message));
+    toast("Backup saved");
+  } catch (e) { toast(e.message); }
+  b.disabled = false;
+};
+function showRestored(r) {
+  const parts = [];
+  if (r.loadouts_added.length) parts.push(`added ${r.loadouts_added.map(esc).join(", ")}`);
+  if (r.loadouts_merged.length) parts.push(`added new items to ${r.loadouts_merged.map(esc).join(", ")}`);
+  const text = parts.length
+    ? `ModHub ${parts.join(", and ")}. ${r.items} ${r.items === 1 ? "item" : "items"} and ${r.files} of your own files came back. Nothing was removed.`
+    : "Everything in this backup was already here, so nothing changed.";
+  $("#bkOut").innerHTML = `<div class="banner" style="margin-top:12px"><div class="grow"><b>Restored your library${r.from ? " from " + esc(r.from) : ""}</b><p>${text}</p></div></div>`;
+  toast("Library restored");
+}
+$("#bkFile").onchange = async e => {
+  const file = e.target.files[0]; e.target.value = "";
+  if (!file) return;
+  try {
+    const r = await fetch("/api/backup/restore", {method: "POST", headers: {"X-Token": T, "X-Filename": encodeURIComponent(file.name)}, body: file});
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText);
+    const {restored, ...st} = j; S = st; renderAll(); showRestored(restored);
+  } catch (err) { $("#bkOut").innerHTML = `<div class="banner err" style="margin-top:12px"><div class="grow"><b>Couldn't restore</b><p>${esc(err.message)}</p></div></div>`; }
+};
 
 /* ---------- new Minecraft versions ---------- */
 let newVerPoll;
