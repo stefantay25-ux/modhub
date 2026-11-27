@@ -53,10 +53,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.4", "notes": [
+        "New: How to use. Click it at the bottom of the sidebar for a quick four-step guide, with a button to jump to each page.",
+    ]},
     {"version": "3.3", "notes": [
         "New: ModHub for Mac. Download it from modhub-mc.github.io, for Macs with Apple chips or older Intel Macs.",
         "More options under Appearance is tidier: two small panels, Colours and Layout, with shorter labels.",
@@ -4966,6 +4969,19 @@ details.adv[open] > *:not(summary){margin-top:14px}
 .swatches.mini .sw.on i{box-shadow:0 0 0 2px var(--stone-2),0 0 0 4px var(--sw)}
 :root[data-radius="sharp"] .ap-group{border-radius:3px}
 :root[data-radius="round"] .ap-group{border-radius:20px}
+
+/* how to use */
+.help-btn{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;border-radius:8px;background:none;color:var(--muted);font-weight:600;font-size:13.5px;cursor:pointer;text-align:left}
+.help-btn svg{width:17px;height:17px;flex:none}
+.help-btn:hover{color:var(--text);background:rgb(var(--hi) / .04)}
+.howto{width:min(560px,100%)}
+.steps-list{list-style:none;counter-reset:st;margin:18px 0 0;padding:0;display:grid;gap:10px}
+.steps-list li{counter-increment:st;display:grid;grid-template-columns:30px 1fr auto;grid-template-rows:auto auto;column-gap:12px;align-items:center;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid var(--line)}
+.steps-list li::before{content:counter(st);grid-row:1 / 3;width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font:800 13px var(--display);background:var(--accent-tint);color:var(--accent-2)}
+.steps-list b{font-size:14.5px}
+.steps-list span{grid-column:2;color:var(--muted);font-size:13px;line-height:1.45}
+.steps-list .btn{grid-column:3;grid-row:1 / 3}
+.howto kbd{font:600 11px/1 var(--body);padding:3px 6px;border-radius:5px;background:var(--stone-3);color:var(--muted)}
 /* ---------- 3.1: backgrounds, customisation, cards ---------- */
 :root{zoom:var(--ui-zoom,1);--gdir:180deg;--gpos:50% -12%}
 :root[data-dir="corner"]{--gdir:150deg;--gpos:0% 0%}
@@ -5059,6 +5075,7 @@ details.card:not([open]){gap:0}
       Settings</button>
     <div class="foot">
       <button class="upd hidden" id="updPill"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg><span>Update to <b id="updVer"></b></span></button>
+      <button class="help-btn" id="helpBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6M12 17h.01"/></svg>How to use</button>
       <div class="version" id="verLabel"></div>
     </div>
   </aside>
@@ -5353,6 +5370,22 @@ details.card:not([open]){gap:0}
 </div>
 
 <button class="wn-fab" id="wnFab" title="What's new in ModHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span>What's new</span><i class="wn-dot hidden" id="wnDot"></i></button>
+<!-- how to use -->
+<div class="scrim hidden" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+  <div class="modal howto">
+    <h2 id="helpTitle">How to use ModHub</h2>
+    <p class="lede">Four steps, and the last one happens by itself.</p>
+    <ol class="steps-list">
+      <li><b>Add your mods</b><span>Import the mods folder you already play with, or search Modrinth on the Library page.</span><button class="btn sm" data-help-go="library">Open Library</button></li>
+      <li><b>Find more</b><span>Discover shows what's popular for your Minecraft version, and picks that go with your mods.</span><button class="btn sm" data-help-go="discover">Open Discover</button></li>
+      <li><b>Install</b><span>Pick a Minecraft version and your launcher, then click Install. ModHub sets everything up.</span><button class="btn sm" data-help-go="install">Open Install</button></li>
+      <li><b>Stay up to date</b><span>ModHub tells you when a missing mod comes out. Update brings an instance up to date in one click.</span><button class="btn sm" data-help-go="instances">Open Instances</button></li>
+    </ol>
+    <p class="help" style="margin:16px 0 0">Tip: press <kbd>Ctrl</kbd> <kbd>K</kbd> to jump to anything.</p>
+    <div class="foot"><button class="btn go" data-close>Got it</button></div>
+  </div>
+</div>
+
 <!-- mod page -->
 <div class="scrim hidden" id="modModal" role="dialog" aria-modal="true" aria-labelledby="mpTitle">
   <div class="modal modpage" id="mpBody"></div>
@@ -6651,6 +6684,10 @@ function showChanges(updates, title) {
   return true;
 }
 
+/* ---------- how to use ---------- */
+$("#helpBtn").onclick = () => openModal("#helpModal");
+$$("[data-help-go]").forEach(b => b.onclick = () => { closeModals(); go(b.dataset.helpGo); });
+
 /* ---------- ModHub's own changelog ---------- */
 function showWhatsNew(entries, title, lede, fresh = [], action = null) {
   if (!entries || !entries.length) return false;
@@ -6957,6 +6994,7 @@ function palItems(q) {
   add("Actions", dark ? "Switch to light mode" : "Switch to dark mode", () => setTheme({mode: dark ? "light" : "dark"}), {ico: ICON.swap});
   if (q) ACCENTS.filter(a => a[0] !== (S.theme || {}).accent).forEach(([id, n, c]) =>
     add("Colours", `${n} colour theme`, () => setTheme({accent: id}), {ico: `<i style="width:14px;height:14px;border-radius:4px;background:${c}"></i>`}));
+  add("Actions", "How to use ModHub", () => openModal("#helpModal"), {ico: ICON.file});
   add("Actions", "What's new in ModHub", () => showHistory(), {ico: ICON.file, s: `Version ${S.version}`});
   add("Actions", "Check for ModHub updates", () => { go("settings"); after(() => $("#updCheck").click()); }, {ico: ICON.search});
   (S.loadouts || []).filter(l => l.id !== S.active_loadout).forEach(l =>
