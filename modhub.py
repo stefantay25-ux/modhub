@@ -53,9 +53,16 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.6"
+APP_VERSION = "3.0"
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.0", "notes": [
+        "New: Discover. See what's popular and freshly updated for your Minecraft version, plus picks that go with the mods you already have.",
+        "New: mod pages. Click any mod to see its screenshots, description, what it needs and whether it's out for your version.",
+        "New: light mode, dark mode, or match Windows, plus six colour themes. Find them in Settings, under Appearance.",
+        "A calmer layout: fewer buttons on the Library page, a tidier sidebar, and Settings grouped into clear sections.",
+        "Fixed the logo turning dark when you hovered over it.",
+    ]},
     {"version": "2.6", "notes": [
         "New: a What's new button in the bottom-right corner. It shows what the last few updates brought, or all of them.",
         "A red dot on it means there's an update you haven't read about yet.",
@@ -320,16 +327,116 @@ def search_loaders(loader):
     return ["quilt", "fabric"] if loader == "quilt" else [loader]
 
 
-def mr_search(query, loader=None, limit=20, kind="mod"):
+def mr_search(query, loader=None, limit=20, kind="mod", version=None, index=None):
     facets = [[f"project_type:{kind}"]]
     if loader and kind == "mod":
         facets.append([f"categories:{l}" for l in search_loaders(loader)])
-    r = http_json("GET", f"{MODRINTH}/search?" + q({"query": query, "limit": limit, "facets": json.dumps(facets)})) or {}
+    if version:
+        facets.append([f"versions:{version}"])
+    params = {"limit": limit, "facets": json.dumps(facets)}
+    if query:
+        params["query"] = query
+    if index in ("relevance", "downloads", "follows", "newest", "updated"):
+        params["index"] = index
+    r = http_json("GET", f"{MODRINTH}/search?" + q(params)) or {}
     return [{"source": "modrinth", "id": h["project_id"], "slug": h.get("slug"), "name": h.get("title"),
              "desc": h.get("description", ""), "icon": h.get("icon_url") or "", "downloads": h.get("downloads", 0),
              "author": h.get("author", ""), "kind": kind,
              "url": f"https://modrinth.com/{kind}/{h.get('slug') or h['project_id']}"}
             for h in r.get("hits") or []]
+
+
+# ---- Discover: what's out for your version, and what goes with your library ----
+GOES_WITH = {  # slug in your library -> (slug to suggest, why)
+    "sodium": [("lithium", "faster game logic"), ("ferrite-core", "uses less memory"),
+               ("entityculling", "skips drawing what you can't see"), ("immediatelyfast", "faster text and HUD")],
+    "embeddium": [("ferrite-core", "uses less memory"), ("modernfix", "faster loading")],
+    "iris": [("complementary-reimagined", "a favourite shader for Iris"), ("bsl-shaders", "a classic shader for Iris")],
+    "fabric-api": [("modmenu", "see and set up your mods in game")],
+    "create": [("jei", "look up Create's recipes")],
+    "xaeros-minimap": [("xaeros-world-map", "a full map to go with it")],
+    "journeymap": [("waystones", "travel between the places you mark")],
+}
+DISCOVER_CACHE = {}
+
+
+def discover_feed(kind, version, loader):
+    key = (kind, version, loader)
+    hit_ = DISCOVER_CACHE.get(key)
+    if hit_ and time.time() - hit_[0] < 600:
+        feed = hit_[1]
+    else:
+        feed = {"popular": mr_search("", loader, 18, kind, version, "follows"),
+                "updated": mr_search("", loader, 12, kind, version, "updated")}
+        DISCOVER_CACHE[key] = (time.time(), feed)
+    with CFG_LOCK:
+        mine = {(f.get("slug") or "").lower(): f.get("name") for f in CFG.get("favorites", []) if f.get("source") == "modrinth"}
+    wanted = {}
+    for slug, name in mine.items():
+        for sug, why in GOES_WITH.get(slug, []):
+            if sug not in mine and sug not in wanted:
+                wanted[sug] = f"Goes with {name}: {why}"
+    picks = []
+    if wanted:
+        try:
+            got = http_json("GET", f"{MODRINTH}/projects?" + q({"ids": json.dumps(list(wanted))})) or []
+        except Exception:
+            got = []
+        lds = set(watch_loaders(kind, loader))
+        for pr in got:
+            ptype = pr.get("project_type") if pr.get("project_type") in ("resourcepack", "shader") else "mod"
+            if ptype != kind:
+                continue
+            if version and pr.get("game_versions") and version not in pr["game_versions"]:
+                continue
+            if pr.get("loaders") and not lds & set(pr["loaders"]):
+                continue
+            item = mr_fav(pr)
+            item.update(why=wanted.get((pr.get("slug") or "").lower(), ""), downloads=pr.get("downloads", 0))
+            picks.append(item)
+    return {"picks": picks, **feed}
+
+
+def _release_like(v):
+    return bool(re.fullmatch(r"\d+(\.\d+)+", v or ""))
+
+
+def project_page(pid, version, loader):
+    """Everything the mod page shows: details, pictures, and whether it's out for your version."""
+    p = http_json("GET", f"{MODRINTH}/project/{urllib.parse.quote(pid)}")
+    if not p:
+        raise UserError("Modrinth doesn't have that project any more.")
+    kind = p.get("project_type") if p.get("project_type") in ("resourcepack", "shader") else "mod"
+    out = mr_fav(p)
+    out.update(body=(p.get("body") or "")[:20000], downloads=p.get("downloads", 0), followers=p.get("followers", 0),
+               categories=[c for c in p.get("categories") or [] if c not in LOADERS][:8], loaders=p.get("loaders") or [],
+               gallery=[{"url": g.get("url"), "title": g.get("title") or ""} for g in (p.get("gallery") or [])
+                        if isinstance(g, dict) and str(g.get("url", "")).startswith("https://")][:8],
+               license=(p.get("license") or {}).get("name") or (p.get("license") or {}).get("id") or "",
+               updated=p.get("updated") or "", links={k: p.get(k) for k in ("source_url", "issues_url", "wiki_url", "discord_url")
+                                                       if str(p.get(k) or "").startswith("https://")})
+    rel = [v for v in p.get("game_versions") or [] if _release_like(v)]
+    out["newest_mc"] = max(rel, key=version_tuple) if rel else ""
+    out["ready"] = None
+    out["needs"] = []
+    if version:
+        try:
+            v = mr_latest_for(p["id"], watch_loaders(kind, loader), version)
+        except Exception:
+            v = None
+        if v:
+            out["ready"] = {"version": v.get("version_number") or "", "type": v.get("version_type") or "release"}
+            need = [d["project_id"] for d in v.get("dependencies") or [] if d.get("dependency_type") == "required" and d.get("project_id")]
+            if need:
+                projs = mr_projects(need)
+                out["needs"] = [mr_fav(projs[i]) for i in need if i in projs]
+    try:
+        team = http_json("GET", f"{MODRINTH}/project/{p['id']}/members") or []
+        owner = next((m for m in team if m.get("role") == "Owner"), team[0] if team else None)
+        out["author"] = ((owner or {}).get("user") or {}).get("username", "")
+    except Exception:
+        out["author"] = ""
+    return out
 
 
 def mr_projects(ids):
@@ -2597,6 +2704,23 @@ def update_search_dirs():
     return out
 
 
+THEME_MODES = ("dark", "light", "system")
+THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose")
+
+
+def theme_of(cfg):
+    t = cfg.get("theme") if isinstance(cfg.get("theme"), dict) else {}
+    return {"mode": t.get("mode") if t.get("mode") in THEME_MODES else "dark",
+            "accent": t.get("accent") if t.get("accent") in THEME_ACCENTS else "crimson"}
+
+
+def page_html():
+    with CFG_LOCK:
+        t = theme_of(CFG)
+    return PAGE.replace("__TOKEN__", TOKEN).replace(
+        '<html lang="en">', f'<html lang="en" data-pref="{t["mode"]}" data-accent="{t["accent"]}">', 1)
+
+
 def changes_in_text(text):
     """Read APP_CHANGES out of another copy of ModHub without running it."""
     try:
@@ -2927,6 +3051,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": cfg.get("update_source", ""), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
+            "theme": theme_of(cfg),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -2940,6 +3065,22 @@ def api(path, body):
             return {"results": mr_search(qtext, body.get("loader") or None, kind=kind), "errors": []}
         except Exception as e:
             return {"results": [], "errors": [f"Modrinth search didn't work: {e}"]}
+    if path == "/api/discover":
+        kind = body.get("kind") if body.get("kind") in ("resourcepack", "shader") else "mod"
+        loader = body.get("loader") if body.get("loader") in LOADERS else "fabric"
+        try:
+            return discover_feed(kind, (body.get("version") or "").strip(), loader)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise UserError(f"Couldn't reach Modrinth. Check your internet. ({e})")
+    if path == "/api/project":
+        loader = body.get("loader") if body.get("loader") in LOADERS else "fabric"
+        pid = str(body.get("id") or "").strip()
+        if not re.fullmatch(r"[\w.-]{1,64}", pid):
+            raise UserError("Bad project.")
+        try:
+            return project_page(pid, (body.get("version") or "").strip(), loader)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise UserError(f"Couldn't reach Modrinth. Check your internet. ({e})")
     if path == "/api/favorites/add":
         m = body.get("mod") or {}
         if m.get("source") != "modrinth" or not m.get("id"):
@@ -3074,6 +3215,16 @@ def api(path, body):
             if src.is_file() and src.suffix.lower() in (".jar", ".zip"):  # mods, resource packs, shaders
                 added.append(add_local_file(src, src.name, body.get("version") or None)["item"]["name"])
         return {"added": added, "favorites": CFG["favorites"]}
+    if path == "/api/theme":
+        with CFG_LOCK:
+            t = theme_of(CFG)
+            if body.get("mode") in THEME_MODES:
+                t["mode"] = body["mode"]
+            if body.get("accent") in THEME_ACCENTS:
+                t["accent"] = body["accent"]
+            CFG["theme"] = t
+            save_config(CFG)
+        return {"theme": t}
     if path == "/api/settings":
         with CFG_LOCK:
             if body.get("loader") in LOADERS:
@@ -3286,7 +3437,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/":
             if urllib.parse.parse_qs(u.query).get("t", [""])[0] != TOKEN:
                 return self._send(403, b"Open ModHub from its shortcut, or run modhub.py again.", "text/plain")
-            return self._send(200, PAGE.replace("__TOKEN__", TOKEN).encode(), "text/html; charset=utf-8")
+            return self._send(200, page_html().encode(), "text/html; charset=utf-8")
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -3972,16 +4123,37 @@ PAGE = r'''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ModHub</title>
 <link rel="icon" href="/icon.png">
+<script>(function(){var d=document.documentElement,m=d.dataset.pref||"dark";if(m==="system")m=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";d.dataset.mode=m;})()</script>
 <style>
 :root{
-  --deep:#0b0b0d; --stone:#131316; --stone-2:#1c1c21; --stone-3:#27272d; --edge:#37373f;
+  --deep:#0b0b0d; --stone:#131316; --stone-2:#1c1c21; --stone-3:#27272d; --stone-4:#2c2c33; --edge:#37373f; --edge-2:#4b4b55;
+  --line:#24242a; --slot:#25252b; --slot-ghost:#1d1d22; --well:#19191e; --tile:#e8e6e3;
   --text:#f3f1ef; --muted:#a9a6ad; --faint:#7a7780;
-  --accent:#d7263d; --accent-2:#ec3a50; --accent-ink:#ffffff; --accent-tint:#2a1216;
-  --amber:#f0a43a; --attn:#7cb8ff; --ready:#45b97c; --missing:#ff5a5f; --link:#ff7f8c;
+  --acc:215 38 61; --acc2:236 58 80; --acc3:168 26 45;
+  --accent:rgb(var(--acc)); --accent-2:rgb(var(--acc2)); --accent-3:rgb(var(--acc3)); --accent-ink:#ffffff;
+  --accent-tint:color-mix(in srgb,var(--accent) 16%,var(--stone)); --accent-edge:color-mix(in srgb,var(--accent) 38%,var(--stone));
+  --link:color-mix(in srgb,var(--accent-2) 65%,#fff);
+  --amber:#f0a43a; --attn:#7cb8ff; --ready:#45b97c; --missing:#ff5a5f;
   --mr:#1bd96a; --cf:#f16436;
+  --hi:255 255 255; --shk:1; --knob:#cfccd2; --glass:19 19 22; --toast:243 241 239; --toast-ink:#0b0b0d;
+  color-scheme:dark;
   --display: "Segoe UI Variable Display", ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
   --body: "Segoe UI Variable Text", "Segoe UI Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
+:root[data-mode="light"]{
+  --deep:#ecebef; --stone:#f7f7f9; --stone-2:#ffffff; --stone-3:#e9e8ed; --stone-4:#e0dfe5; --edge:#d3d2d9; --edge-2:#b9b8c1;
+  --line:#e4e3e8; --slot:#dcdbe1; --slot-ghost:#e7e6eb; --well:#e4e3e8; --tile:#1c1b20;
+  --text:#17161a; --muted:#57545d; --faint:#7c7984;
+  --link:color-mix(in srgb,var(--accent) 80%,#000);
+  --amber:#a8650a; --attn:#2563c9; --ready:#1d7f4d; --missing:#d0343a;
+  --hi:0 0 0; --shk:.32; --knob:#ffffff; --glass:252 252 253; --toast:23 22 26; --toast-ink:#ffffff;
+  color-scheme:light;
+}
+:root[data-accent="emerald"]{--acc:14 158 90; --acc2:22 190 108; --acc3:10 110 64}
+:root[data-accent="ocean"]{--acc:37 99 235; --acc2:66 133 247; --acc3:26 70 170}
+:root[data-accent="violet"]{--acc:124 58 237; --acc2:147 97 250; --acc3:90 38 180}
+:root[data-accent="amber"]{--acc:202 112 8; --acc2:232 142 22; --acc3:150 82 6}
+:root[data-accent="rose"]{--acc:214 41 118; --acc2:236 72 153; --acc3:160 28 88}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--stone);color:var(--text);font:15px/1.5 var(--body);-webkit-font-smoothing:antialiased}
@@ -3995,14 +4167,14 @@ button,input,select{font:inherit;color:inherit}
 .side{background:var(--deep);padding:22px 14px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
 .brand{display:flex;align-items:center;gap:11px;padding:4px 10px 22px;font:800 20px/1 var(--display);letter-spacing:.2px}
 .mark{width:26px;height:26px;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px}
-.mark i{border-radius:2px;background:var(--stone-3)} .mark i:nth-child(1){background:var(--accent)} .mark i:nth-child(4){background:#e8e6e3}
+.mark i{border-radius:2px;background:var(--stone-3)} .mark i:nth-child(1){background:var(--accent)} .mark i:nth-child(4){background:var(--tile)}
 .nav{display:flex;align-items:center;gap:10px;width:100%;padding:10px 12px;border:0;border-radius:8px;background:none;color:var(--muted);font-weight:600;cursor:pointer;text-align:left}
-.nav:hover{color:var(--text);background:rgba(255,255,255,.03)}
+.nav:hover{color:var(--text);background:rgb(var(--hi) / .03)}
 .nav.on{color:var(--text);background:var(--stone-2);box-shadow:inset 3px 0 0 var(--accent)}
 .nav svg{width:18px;height:18px;flex:none;opacity:.85}
 .nav .n{margin-left:auto;font-size:11.5px;color:var(--muted);font-weight:700;background:var(--stone-3);border-radius:10px;padding:1px 8px;min-width:22px;text-align:center}
 .nav .n:empty{display:none}
-.nav .dot-new{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 3px rgba(215,38,61,.25)}
+.nav .dot-new{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--accent-2);box-shadow:0 0 0 3px rgb(var(--acc) / .25)}
 .nav.on .n{color:var(--muted)}
 .side .foot{margin-top:auto;padding:10px 12px;font-size:12.5px;color:var(--faint)}
 .side .foot button{background:none;border:0;color:var(--muted);cursor:pointer;padding:0;font-size:12.5px;text-decoration:underline;text-underline-offset:3px}
@@ -4017,7 +4189,7 @@ h3{font:700 18px/1.3 var(--display);margin:0}
 /* ---------- controls ---------- */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:8px;border:1px solid var(--edge);background:var(--stone-2);font-weight:650;cursor:pointer;white-space:nowrap}
 .btn:hover{background:var(--stone-3)}
-.btn.go{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);box-shadow:inset 0 -3px 0 rgba(0,0,0,.25)}
+.btn.go{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);box-shadow:inset 0 -3px 0 rgb(0 0 0 / calc(.25 * var(--shk)))}
 .btn.go:hover{background:var(--accent-2);border-color:var(--accent-2)}
 .btn.sm{height:32px;padding:0 12px;font-size:13.5px}
 .btn.quiet{background:none;border-color:transparent;color:var(--muted)} .btn.quiet:hover{color:var(--text);background:var(--stone-2)}
@@ -4041,7 +4213,7 @@ input::placeholder{color:var(--faint)}
 .searchbar .q input{height:46px;padding-left:42px;font-size:15.5px}
 .searchbar .q svg{position:absolute;left:14px;top:14px;width:18px;height:18px;color:var(--faint)}
 .searchbar select{width:150px;height:46px}
-.results{margin-top:14px;background:var(--stone-2);border:1px solid #24242a;border-radius:14px;overflow:hidden}
+.results{margin-top:14px;background:var(--stone-2);border:1px solid var(--line);border-radius:14px;overflow:hidden}
 .results-h{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;color:var(--muted);font-size:13.5px;border-bottom:1px solid var(--stone-3)}
 .res{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--stone-3)}
 .res:last-child{border-bottom:0}
@@ -4055,19 +4227,19 @@ input::placeholder{color:var(--faint)}
 
 .inv-h{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:40px 0 16px}
 .inv-h .filter{width:220px;height:34px}
-.inv{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:18px 14px;background:var(--deep);padding:22px;border-radius:14px;border:1px solid #1f1f25}
+.inv{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:18px 14px;background:var(--deep);padding:22px;border-radius:14px;border:1px solid var(--line)}
 .cell{display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0}
-.slot{position:relative;width:100%;aspect-ratio:1;border-radius:6px;background:#25252b;transition:transform .12s ease, box-shadow .12s ease;
-  box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),inset -3px -3px 0 rgba(255,255,255,.06);display:grid;place-items:center}
+.slot{position:relative;width:100%;aspect-ratio:1;border-radius:6px;background:var(--slot);transition:transform .12s ease, box-shadow .12s ease;
+  box-shadow:inset 3px 3px 0 rgb(0 0 0 / calc(.6 * var(--shk))),inset -3px -3px 0 rgb(var(--hi) / .06);display:grid;place-items:center}
 .slot img{width:58%;height:58%;object-fit:contain;border-radius:6px;image-rendering:auto}
-.slot .letter{font:800 30px var(--display);color:#7a7780}
+.slot .letter{font:800 30px var(--display);color:var(--faint)}
 .slot .srcmark{position:absolute;right:8px;bottom:8px}
-.slot .rm{position:absolute;top:5px;right:5px;width:24px;height:24px;border-radius:6px;border:0;background:rgba(8,8,10,.85);color:var(--text);cursor:pointer;display:grid;place-items:center;opacity:0}
+.slot .rm{position:absolute;top:5px;right:5px;width:24px;height:24px;border-radius:6px;border:0;background:rgb(var(--glass) / .85);color:var(--text);cursor:pointer;display:grid;place-items:center;opacity:0}
 .cell:hover .rm,.rm:focus-visible{opacity:1}
 .rm:hover{background:var(--accent)}
 .cell .cap{font-size:13px;text-align:center;line-height:1.3;max-width:100%;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--text)}
-.cell.ghost .slot{background:#1d1d22}
-.cell:not(.ghost):hover .slot{transform:translateY(-2px);box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),inset -3px -3px 0 rgba(255,255,255,.06),0 0 0 2px var(--accent)}
+.cell.ghost .slot{background:var(--slot-ghost)}
+.cell:not(.ghost):hover .slot{transform:translateY(-2px);box-shadow:inset 3px 3px 0 rgb(0 0 0 / calc(.6 * var(--shk))),inset -3px -3px 0 rgb(var(--hi) / .06),0 0 0 2px var(--accent)}
 .inv-empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:6px 0 2px}
 
 /* ---------- install ---------- */
@@ -4099,7 +4271,7 @@ details.log{margin-top:8px}
 details.log summary{cursor:pointer;color:var(--faint);font-size:13px}
 details.log pre{margin:8px 0 0;background:var(--deep);border-radius:8px;padding:12px 14px;font:12.5px/1.55 ui-monospace,Consolas,monospace;color:var(--muted);max-height:220px;overflow:auto;white-space:pre-wrap}
 
-.banner{display:flex;gap:14px;align-items:center;padding:16px 18px;border-radius:12px;margin-top:22px;background:var(--stone-2);border:1px solid #26262c;border-left:4px solid var(--ready)}
+.banner{display:flex;gap:14px;align-items:center;padding:16px 18px;border-radius:12px;margin-top:22px;background:var(--stone-2);border:1px solid var(--line);border-left:4px solid var(--ready)}
 .banner .grow{min-width:0}
 .banner.err{border-left-color:var(--missing)}
 .banner.warn{border-left-color:var(--amber)}
@@ -4110,7 +4282,7 @@ details.log pre{margin:8px 0 0;background:var(--deep);border-radius:8px;padding:
 .group-h{display:flex;align-items:center;gap:10px;margin-bottom:10px}
 .group-h .count{color:var(--faint);font-weight:600}
 .group-h .lede{font-size:13.5px}
-.list{background:var(--stone-2);border:1px solid #24242a;border-radius:14px;overflow:hidden}
+.list{background:var(--stone-2);border:1px solid var(--line);border-radius:14px;overflow:hidden}
 .li{display:flex;align-items:center;gap:14px;padding:11px 16px;border-bottom:1px solid var(--stone-3)}
 .li:last-child{border-bottom:0}
 .li .ico{width:34px;height:34px;border-radius:6px;font-size:14px}
@@ -4123,7 +4295,7 @@ details.log pre{margin:8px 0 0;background:var(--deep);border-radius:8px;padding:
 .chips{display:flex;flex-wrap:wrap;gap:8px;padding:14px 16px}
 .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px 5px 6px;border-radius:7px;background:var(--stone-3);font-size:13.5px}
 .chip .ico{width:22px;height:22px;border-radius:4px;font-size:11px}
-.chip.port{background:var(--accent-tint);box-shadow:inset 0 0 0 1px #4a1c22}
+.chip.port{background:var(--accent-tint);box-shadow:inset 0 0 0 1px var(--accent-edge)}
 
 .block{padding:0 0 30px}
 .block + .block{padding-top:4px}
@@ -4151,29 +4323,29 @@ details.more > summary:hover{color:var(--text)}
 .kindseg{margin-bottom:14px}
 .lobar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 18px}
 .lochip{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 6px 0 14px;border-radius:18px;border:1px solid var(--edge);background:var(--stone-2);color:var(--muted);font-weight:650;cursor:pointer;transition:border-color .2s,background .2s,color .2s,transform .15s}
-.lochip:hover{color:var(--text);border-color:#4b4b55}
+.lochip:hover{color:var(--text);border-color:var(--edge-2)}
 .lochip .c{font-size:11.5px;font-weight:700;background:var(--stone-3);border-radius:10px;padding:1px 8px;color:var(--muted)}
 .lochip .ed{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;border:0;background:none;color:inherit;cursor:pointer;opacity:.7}
-.lochip .ed:hover{background:rgba(255,255,255,.08);opacity:1}
-.lochip.on{color:var(--text);border-color:var(--accent);background:var(--accent-tint);box-shadow:0 6px 20px -12px rgba(236,58,80,.8)}
+.lochip .ed:hover{background:rgb(var(--hi) / .08);opacity:1}
+.lochip.on{color:var(--text);border-color:var(--accent);background:var(--accent-tint);box-shadow:0 6px 20px -12px rgb(var(--acc2) / .8)}
 .lochip.on .c{background:var(--accent);color:#fff}
 .lochip.add{padding:0 14px;border-style:dashed;background:none}
 .lochip:not(.on):not(.add) .ed{display:none}
 .lochip:not(.on):not(.add){padding-right:14px}
-.inst{background:var(--stone-2);border:1px solid #24242a;border-radius:14px;padding:18px;margin-bottom:12px}
+.inst{background:var(--stone-2);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:12px}
 .inst-top{display:flex;gap:14px;align-items:flex-start}
-.inst-ico{width:44px;height:44px;border-radius:10px;background:var(--deep);display:grid;place-items:center;flex:none;font:800 13px var(--display);color:var(--accent-2);border:1px solid #2a2a31}
+.inst-ico{width:44px;height:44px;border-radius:10px;background:var(--deep);display:grid;place-items:center;flex:none;font:800 13px var(--display);color:var(--accent-2);border:1px solid var(--stone-4)}
 .inst .body{flex:1;min-width:0}
 .inst .t{font-weight:700;font-size:16px}
 .inst .s{color:var(--muted);font-size:13.5px}
 .inst .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .tag{font-size:12px;font-weight:650;color:var(--muted);background:var(--stone-3);border-radius:6px;padding:2px 8px}
-.tag.lo{color:var(--text);background:var(--accent-tint);box-shadow:inset 0 0 0 1px #4a1c22}
+.tag.lo{color:var(--text);background:var(--accent-tint);box-shadow:inset 0 0 0 1px var(--accent-edge)}
 .inst .actions{margin-top:14px}
 .inst .res-line{margin-top:10px;font-size:13.5px;color:var(--muted)}
 .inst .res-line b{color:var(--ready)}
-.inst.busy{border-color:#4a1c22}
-.prob{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid #24242a;margin-top:10px}
+.inst.busy{border-color:var(--accent-edge)}
+.prob{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid var(--line);margin-top:10px}
 .prob .ic{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;flex:none;font-weight:800;font-size:14px}
 .prob.open .ic{background:rgba(240,164,58,.15);color:var(--amber)}
 .prob.fixed .ic{background:rgba(69,185,124,.15);color:var(--ready)}
@@ -4183,25 +4355,25 @@ details.more > summary:hover{color:var(--text)}
 .prob p{margin:3px 0 0;color:var(--muted);font-size:13.5px}
 .prob .actions{margin-top:10px}
 .prob.fixed b{color:var(--muted);font-weight:600;text-decoration:line-through;text-decoration-color:rgba(255,255,255,.25)}
-.crashn{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(255,90,95,.13),var(--stone-2) 60%);border:1px solid #4a1c22}
+.crashn{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(255,90,95,.13),var(--stone-2) 60%);border:1px solid var(--accent-edge)}
 .crashn .boom{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:rgba(255,90,95,.15);color:var(--missing);flex:none;font:800 20px var(--display)}
 .crashn .grow{flex:1;min-width:0}
 .crashn b{display:block}
 .crashn p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
 .errline{font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--faint);background:var(--deep);border-radius:8px;padding:8px 10px;margin-top:12px;overflow-wrap:anywhere}
-.boost{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 18px;border-radius:14px;background:linear-gradient(90deg,rgba(242,184,75,.10),var(--stone-2) 55%);border:1px solid #3b331f}
+.boost{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 18px;border-radius:14px;background:linear-gradient(90deg,rgba(242,184,75,.10),var(--stone-2) 55%);border:1px solid color-mix(in srgb,var(--amber) 30%,var(--stone))}
 .boost .bolt{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:rgba(242,184,75,.14);color:#f2b84b;flex:none}
 .boost .grow{flex:1;min-width:0}
 .boost b{display:block}
 .boost p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
-.pmod{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:var(--stone-2);border:1px solid #24242a;margin-top:8px;cursor:pointer}
+.pmod{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:var(--stone-2);border:1px solid var(--line);margin-top:8px;cursor:pointer}
 .pmod input{width:18px;height:18px;accent-color:var(--accent);flex:none}
 .pmod .grow{flex:1;min-width:0}
 .pmod b{display:block;font-weight:650}
 .pmod p{margin:1px 0 0;color:var(--muted);font-size:13px}
 .pmod.na{opacity:.5;cursor:default}
 .pmod .tag{flex:none}
-.carry{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid #24242a}
+.carry{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid var(--line)}
 .carry select{width:auto;min-width:260px;height:36px}
 .chg{padding:14px 0;border-top:1px solid var(--stone-3)}
 .chg:first-of-type{border-top:0}
@@ -4217,31 +4389,31 @@ details.more > summary:hover{color:var(--text)}
 .cl b{color:var(--text)}
 .cl code{background:var(--deep);padding:0 5px;border-radius:4px;font-size:12.5px}
 .cl-more{margin:4px 0 0 46px}
-.catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid #23402f}
+.catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid color-mix(in srgb,var(--ready) 30%,var(--stone))}
 .catch .grow{flex:1;min-width:0}
 .catch b{display:block}
 .catch p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
 .newver{display:flex;align-items:center;gap:16px;padding:16px 18px;margin:0 0 24px;border-radius:14px;
-  background:linear-gradient(90deg,var(--accent-tint),var(--stone-2) 70%);border:1px solid #4a1c22}
+  background:linear-gradient(90deg,var(--accent-tint),var(--stone-2) 70%);border:1px solid var(--accent-edge)}
 .newver .big{font:800 26px/1 var(--display);color:var(--accent-2);min-width:64px;text-align:center}
 .newver .grow{flex:1;min-width:0}
 .newver b{display:block;font-size:16px}
 .newver p{margin:2px 0 0;color:var(--muted)}
 .kindseg button{height:36px;padding:0 16px;font-size:14.5px}
-.dot.own{background:#f3f1ef}
+.dot.own{background:var(--text)}
 .slot .badge{position:absolute;left:6px;top:6px;font:800 10.5px var(--body);background:var(--amber);color:#1a1205;border-radius:5px;padding:1px 5px}
 .cell.own .slot{cursor:pointer}
 .drop{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;border:2px dashed var(--edge);border-radius:14px;padding:30px 20px;text-align:center;color:var(--muted);cursor:pointer;margin-top:16px;transition:border-color .12s, background .12s}
 .drop:hover,.drop.over{border-color:var(--accent);background:var(--accent-tint);color:var(--text)}
 .drop b{color:var(--text);font-size:16px}
 .howto{margin:14px 0 0;padding-left:20px;color:var(--muted);font-size:14px;display:grid;gap:4px}
-.frow{display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--stone-2);border:1px solid #24242a;border-radius:10px;margin-top:8px}
+.frow{display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--stone-2);border:1px solid var(--line);border-radius:10px;margin-top:8px}
 .frow .body{flex:1;min-width:0}
 .frow .t{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .frow .s{color:var(--faint);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .frow select{width:170px;height:34px}
 .frow select.unset{border-color:var(--amber)}
-.dropcover{position:fixed;inset:0;z-index:50;background:rgba(10,10,12,.82);display:grid;place-items:center;pointer-events:none}
+.dropcover{position:fixed;inset:0;z-index:50;background:rgb(var(--glass) / .82);display:grid;place-items:center;pointer-events:none}
 .dropcover div{border:3px dashed var(--accent);border-radius:18px;padding:40px 60px;font:800 24px var(--display);color:var(--text);background:var(--accent-tint)}
 
 /* ---------- ports ---------- */
@@ -4267,7 +4439,7 @@ details.notes pre{white-space:pre-wrap;font:13px/1.55 var(--body);background:var
 .ok{color:var(--ready);font-weight:650}
 
 /* ---------- modal / toast ---------- */
-.scrim{position:fixed;inset:0;background:rgba(0,0,0,.75);display:grid;place-items:center;z-index:30;padding:20px}
+.scrim{position:fixed;inset:0;background:rgb(0 0 0 / calc(.75 * var(--shk)));display:grid;place-items:center;z-index:30;padding:20px}
 .modal{background:var(--stone);border:1px solid var(--edge);border-radius:14px;width:min(600px,100%);max-height:92vh;overflow:auto;padding:26px 28px}
 .modal h2{font:800 22px/1.2 var(--display);margin:0 0 6px}
 .facts{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;margin:18px 0;font-size:14px}
@@ -4278,13 +4450,13 @@ details.notes pre{white-space:pre-wrap;font:13px/1.55 var(--body);background:var
 .cmd{display:flex;gap:8px;margin-top:10px}
 .cmd code{flex:1;background:var(--deep);border-radius:8px;padding:10px 12px;font:12.5px ui-monospace,Consolas,monospace;overflow-x:auto;white-space:nowrap}
 .modal .foot{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#f3f1ef;color:#0b0b0d;padding:11px 18px 11px 14px;border-radius:10px;font-weight:650;z-index:40;box-shadow:0 10px 30px rgba(0,0,0,.5);display:flex;align-items:center;gap:10px;animation:toastIn .18s ease-out}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:rgb(var(--toast));color:var(--toast-ink);padding:11px 18px 11px 14px;border-radius:10px;font-weight:650;z-index:40;box-shadow:0 10px 30px rgb(0 0 0 / calc(.5 * var(--shk)));display:flex;align-items:center;gap:10px;animation:toastIn .18s ease-out}
 .toast::before{content:"";width:18px;height:18px;border-radius:50%;background:var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'%3E%3Cpath d='M5 9.5l2.6 2.6L13 6.6' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/18px no-repeat;flex:none}
 @keyframes toastIn{from{opacity:0;transform:translate(-50%,8px)}}
 section.enter{animation:pageIn .16s ease-out}
 @keyframes pageIn{from{opacity:0;transform:translateY(4px)}}
 .version{font-size:12px;color:var(--faint);margin-top:8px}
-.side .foot .upd{text-decoration:none;font-size:13px;color:var(--text);display:flex;width:100%;align-items:center;gap:8px;margin:0 0 12px;padding:10px 12px;border-radius:9px;border:1px solid #4a1c22;background:var(--accent-tint);color:var(--text);font-weight:650;font-size:13px;cursor:pointer;text-align:left}
+.side .foot .upd{text-decoration:none;font-size:13px;color:var(--text);display:flex;width:100%;align-items:center;gap:8px;margin:0 0 12px;padding:10px 12px;border-radius:9px;border:1px solid var(--accent-edge);background:var(--accent-tint);color:var(--text);font-weight:650;font-size:13px;cursor:pointer;text-align:left}
 .side .foot .upd:hover{border-color:var(--accent)}
 .side .foot .upd b{color:var(--accent-2)}
 .kbd{display:inline-block;font:600 11px ui-monospace,Consolas,monospace;color:var(--faint);border:1px solid var(--edge);border-radius:5px;padding:1px 6px;position:absolute;right:14px;top:13px}
@@ -4305,36 +4477,32 @@ code.inline{background:var(--deep);padding:1px 6px;border-radius:5px;font-size:1
 }
 
 /* ================= premium layer ================= */
-::selection{background:rgba(215,38,61,.45);color:#fff}
-*{scrollbar-width:thin;scrollbar-color:#2e2e36 transparent}
+::selection{background:rgb(var(--acc) / .45);color:#fff}
+*{scrollbar-width:thin;scrollbar-color:var(--stone-4) transparent}
 ::-webkit-scrollbar{width:10px;height:10px}
-::-webkit-scrollbar-thumb{background:#2b2b32;border-radius:10px;border:2px solid var(--stone)}
-::-webkit-scrollbar-thumb:hover{background:#3a3a44}
+::-webkit-scrollbar-thumb{background:var(--stone-4);border-radius:10px;border:2px solid var(--stone)}
+::-webkit-scrollbar-thumb:hover{background:var(--edge)}
 body{background:
-  radial-gradient(900px 520px at 88% -12%, rgba(215,38,61,.11), transparent 62%),
-  radial-gradient(700px 420px at 30% 112%, rgba(215,38,61,.05), transparent 60%), var(--stone);background-attachment:fixed}
-.side{border-right:1px solid #18181d}
-h1{background:linear-gradient(180deg,#ffffff 30%,#c9c5cb);-webkit-background-clip:text;background-clip:text;color:transparent}
+  radial-gradient(900px 520px at 88% -12%, rgb(var(--acc) / .11), transparent 62%),
+  radial-gradient(700px 420px at 30% 112%, rgb(var(--acc) / .05), transparent 60%), var(--stone);background-attachment:fixed}
+.side{border-right:1px solid var(--stone)}
+h1{background:linear-gradient(180deg,var(--text) 30%,color-mix(in srgb,var(--text) 72%,var(--stone)));-webkit-background-clip:text;background-clip:text;color:transparent}
 .page-h{animation:rise .5s cubic-bezier(.2,.9,.3,1) both}
 
 /* brand mark drops in */
 .mark i{animation:markIn .55s cubic-bezier(.2,1.5,.4,1) both;transition:transform .35s cubic-bezier(.3,1.4,.5,1)}
 .mark i:nth-child(2){animation-delay:.07s}.mark i:nth-child(3){animation-delay:.14s}.mark i:nth-child(4){animation-delay:.21s}
-.brand:hover .mark i:nth-child(1){transform:translate(14px,0)}
-.brand:hover .mark i:nth-child(2){transform:translate(0,14px)}
-.brand:hover .mark i:nth-child(4){transform:translate(-14px,0)}
-.brand:hover .mark i:nth-child(3){transform:translate(0,-14px)}
 @keyframes markIn{from{transform:translateY(-10px) scale(.5);opacity:0}}
 
 /* sliding selection: sidebar + segmented controls */
-#navPill{position:absolute;border-radius:8px;background:var(--stone-2);box-shadow:inset 3px 0 0 var(--accent),0 6px 18px -10px rgba(0,0,0,.8);
+#navPill{position:absolute;border-radius:8px;background:var(--stone-2);box-shadow:inset 3px 0 0 var(--accent),0 6px 18px -10px rgb(0 0 0 / calc(.8 * var(--shk)));
   transition:top .38s cubic-bezier(.3,1.25,.5,1),height .38s cubic-bezier(.3,1.25,.5,1);pointer-events:none}
 .nav{position:relative;z-index:1}
 .nav.on{background:transparent;box-shadow:none}
 .nav svg{transition:transform .25s cubic-bezier(.3,1.4,.5,1)}
 .nav:hover svg{transform:scale(1.12)}
 .seg{position:relative}
-.seg .segpill{position:absolute;top:3px;bottom:3px;border-radius:6px;background:var(--stone-3);box-shadow:0 2px 8px -2px rgba(0,0,0,.6);
+.seg .segpill{position:absolute;top:3px;bottom:3px;border-radius:6px;background:var(--stone-3);box-shadow:0 2px 8px -2px rgb(0 0 0 / calc(.6 * var(--shk)));
   transition:left .32s cubic-bezier(.3,1.25,.5,1),width .32s cubic-bezier(.3,1.25,.5,1),opacity .2s;pointer-events:none}
 .seg button{position:relative;z-index:1;transition:color .2s}
 .seg.pilled button.on{background:transparent}
@@ -4342,19 +4510,19 @@ h1{background:linear-gradient(180deg,#ffffff 30%,#c9c5cb);-webkit-background-cli
 /* buttons */
 .btn{transition:transform .14s ease,background .18s,border-color .18s,box-shadow .25s,color .18s}
 .btn:active:not(:disabled){transform:scale(.965)}
-.btn.go{background:linear-gradient(180deg,#e5354c,#c21e34);border-color:#e5354c;position:relative;overflow:hidden;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.2),inset 0 -3px 0 rgba(0,0,0,.22),0 8px 22px -10px rgba(215,38,61,.7)}
-.btn.go:hover:not(:disabled){background:linear-gradient(180deg,#f04a60,#d3263d);border-color:#f04a60;transform:translateY(-1px);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.25),inset 0 -3px 0 rgba(0,0,0,.2),0 14px 30px -10px rgba(236,58,80,.85)}
+.btn.go{background:linear-gradient(180deg,var(--accent),var(--accent-3));border-color:var(--accent);position:relative;overflow:hidden;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.2),inset 0 -3px 0 rgb(0 0 0 / calc(.22 * var(--shk))),0 8px 22px -10px rgb(var(--acc) / .7)}
+.btn.go:hover:not(:disabled){background:linear-gradient(180deg,var(--accent-2),var(--accent));border-color:var(--accent-2);transform:translateY(-1px);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.25),inset 0 -3px 0 rgb(0 0 0 / calc(.2 * var(--shk))),0 14px 30px -10px rgb(var(--acc2) / .85)}
 .btn.go::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.32) 50%,transparent 65%);
   transform:translateX(-130%);transition:transform .7s ease;pointer-events:none}
 .btn.go:hover::after{transform:translateX(130%)}
-.btn:not(.go):hover:not(:disabled){border-color:#4b4b55}
+.btn:not(.go):hover:not(:disabled){border-color:var(--edge-2)}
 
 /* cards light up where the mouse is */
 .lopt,.res,.folder,.frow,.port,.li,.newver,.banner{position:relative;isolation:isolate}
 .lopt::before,.res::before,.folder::before,.frow::before,.port::before,.li::before,.newver::before{content:"";position:absolute;inset:0;border-radius:inherit;
-  background:radial-gradient(280px circle at var(--mx,50%) var(--my,50%),rgba(236,58,80,.12),transparent 62%);opacity:0;transition:opacity .3s;pointer-events:none;z-index:-1}
+  background:radial-gradient(280px circle at var(--mx,50%) var(--my,50%),rgb(var(--acc2) / .12),transparent 62%);opacity:0;transition:opacity .3s;pointer-events:none;z-index:-1}
 .lopt:hover::before,.res:hover::before,.folder:hover::before,.frow:hover::before,.port:hover::before,.li:hover::before,.newver:hover::before{opacity:1}
 .lopt{transition:border-color .2s,background .25s,transform .2s}
 .lopt:hover{transform:translateY(-1px)}
@@ -4371,24 +4539,24 @@ h1{background:linear-gradient(180deg,#ffffff 30%,#c9c5cb);-webkit-background-cli
 .slot img,.slot .letter{transition:transform .25s cubic-bezier(.3,1.3,.5,1)}
 .cell:not(.ghost):hover .slot img,.cell:not(.ghost):hover .slot .letter{transform:translateZ(22px) scale(1.07)}
 .cell .cap{transition:color .2s}
-.cell:not(.ghost):hover .cap{color:#fff}
+.cell:not(.ghost):hover .cap{color:var(--text)}
 .cell.leaving{animation:leave .28s ease forwards}
 @keyframes leave{to{opacity:0;transform:scale(.7)}}
 
 /* windows and pop-ups */
 .scrim{backdrop-filter:blur(8px) saturate(120%);-webkit-backdrop-filter:blur(8px);animation:fadeIn .2s ease}
-.modal{animation:modalIn .34s cubic-bezier(.2,1.25,.4,1);box-shadow:0 40px 90px -24px rgba(0,0,0,.85),0 0 0 1px rgba(255,255,255,.04)}
+.modal{animation:modalIn .34s cubic-bezier(.2,1.25,.4,1);box-shadow:0 40px 90px -24px rgb(0 0 0 / calc(.85 * var(--shk))),0 0 0 1px rgb(var(--hi) / .04)}
 @keyframes modalIn{from{opacity:0;transform:translateY(16px) scale(.95)}}
 @keyframes fadeIn{from{opacity:0}}
-.toast{background:rgba(243,241,239,.9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);animation:toastIn .4s cubic-bezier(.2,1.35,.4,1)}
+.toast{background:rgb(var(--toast) / .9);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);animation:toastIn .4s cubic-bezier(.2,1.35,.4,1)}
 @keyframes toastIn{from{opacity:0;transform:translate(-50%,18px) scale(.94)}}
 .dropcover{animation:fadeIn .15s ease}
 .dropcover div{animation:modalIn .3s cubic-bezier(.2,1.25,.4,1)}
 .drop.over{transform:scale(1.015)}
 
 /* progress */
-.bar{height:10px;border-radius:6px;background:#19191e;box-shadow:inset 0 1px 3px rgba(0,0,0,.6)}
-.bar div{background:linear-gradient(90deg,#a81a2d,#ec3a50);position:relative;overflow:hidden;border-radius:6px;box-shadow:0 0 18px rgba(236,58,80,.45);transition:width .45s cubic-bezier(.3,1,.5,1)}
+.bar{height:10px;border-radius:6px;background:var(--well);box-shadow:inset 0 1px 3px rgb(0 0 0 / calc(.6 * var(--shk)))}
+.bar div{background:linear-gradient(90deg,var(--accent-3),var(--accent-2));position:relative;overflow:hidden;border-radius:6px;box-shadow:0 0 18px rgb(var(--acc2) / .45);transition:width .45s cubic-bezier(.3,1,.5,1)}
 .bar div::after{content:"";position:absolute;inset:0;background-image:repeating-linear-gradient(-45deg,rgba(255,255,255,.16) 0 8px,transparent 8px 16px);background-size:22.6px 22.6px;animation:stripes .7s linear infinite}
 @keyframes stripes{to{background-position:22.6px 0}}
 .now{transition:opacity .18s}
@@ -4396,23 +4564,23 @@ h1{background:linear-gradient(180deg,#ffffff 30%,#c9c5cb);-webkit-background-cli
 
 /* search placeholders */
 .skel{display:flex;gap:14px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--stone-3)}
-.skel i{display:block;border-radius:8px;background:linear-gradient(90deg,#24242a 0%,#2f2f36 50%,#24242a 100%);background-size:200% 100%;animation:shimmer 1.15s linear infinite}
+.skel i{display:block;border-radius:8px;background:linear-gradient(90deg,var(--line) 0%,var(--stone-4) 50%,var(--line) 100%);background-size:200% 100%;animation:shimmer 1.15s linear infinite}
 .skel i:first-child{width:44px;height:44px;flex:none}
 .skel span{flex:1;display:grid;gap:8px}
 @keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
 
 /* new-version banner */
 .newver{overflow:hidden;animation:rise .55s cubic-bezier(.2,.9,.3,1) both}
-.newver::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.06) 45%,transparent 60%);animation:sheen 4s ease-in-out infinite;pointer-events:none}
+.newver::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgb(var(--hi) / .06) 45%,transparent 60%);animation:sheen 4s ease-in-out infinite;pointer-events:none}
 @keyframes sheen{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
-.newver .big{text-shadow:0 0 26px rgba(236,58,80,.55)}
+.newver .big{text-shadow:0 0 26px rgb(var(--acc2) / .55)}
 .nav .dot-new{animation:ping 1.8s ease-out infinite}
-@keyframes ping{0%{box-shadow:0 0 0 0 rgba(236,58,80,.55)}80%,100%{box-shadow:0 0 0 7px rgba(236,58,80,0)}}
+@keyframes ping{0%{box-shadow:0 0 0 0 rgb(var(--acc2) / .55)}80%,100%{box-shadow:0 0 0 7px rgb(var(--acc2) / 0)}}
 
 /* inputs */
 input,select{transition:border-color .18s,box-shadow .2s}
-input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
-.searchbar .q input:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2),0 10px 30px -14px rgba(236,58,80,.5)}
+input:focus,select:focus{box-shadow:0 0 0 3px rgb(var(--acc) / .2)}
+.searchbar .q input:focus{box-shadow:0 0 0 3px rgb(var(--acc) / .2),0 10px 30px -14px rgb(var(--acc2) / .5)}
 .searchbar .q svg{transition:color .2s}
 .searchbar .q:focus-within svg{color:var(--accent-2)}
 
@@ -4424,17 +4592,17 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
 h1{font-variation-settings:"wght" 760;letter-spacing:-.7px}
 
 /* sidebar search pill */
-.kpill{white-space:nowrap;display:flex;align-items:center;gap:9px;margin:-8px 0 14px;padding:0 10px 0 12px;height:36px;border-radius:9px;border:1px solid #26262c;background:#141417;color:var(--faint);cursor:pointer;font-size:13.5px;text-align:left;width:100%;transition:border-color .2s,color .2s,background .2s}
-.kpill:hover{border-color:var(--edge);color:var(--muted);background:#17171b}
+.kpill{white-space:nowrap;display:flex;align-items:center;gap:9px;margin:-8px 0 14px;padding:0 10px 0 12px;height:36px;border-radius:9px;border:1px solid var(--line);background:var(--stone);color:var(--faint);cursor:pointer;font-size:13.5px;text-align:left;width:100%;transition:border-color .2s,color .2s,background .2s}
+.kpill:hover{border-color:var(--edge);color:var(--muted);background:var(--stone)}
 .kpill svg{width:15px;height:15px;flex:none}
-.kpill kbd,.pal kbd{margin-left:auto;white-space:nowrap;font:600 11px/1 var(--body);padding:4px 6px;border-radius:5px;background:var(--stone-3);color:var(--muted);box-shadow:inset 0 -1px 0 rgba(0,0,0,.4)}
+.kpill kbd,.pal kbd{margin-left:auto;white-space:nowrap;font:600 11px/1 var(--body);padding:4px 6px;border-radius:5px;background:var(--stone-3);color:var(--muted);box-shadow:inset 0 -1px 0 rgb(0 0 0 / calc(.4 * var(--shk)))}
 
 /* command palette */
-.pal-scrim{position:fixed;inset:0;z-index:70;background:rgba(5,5,7,.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;justify-content:center;align-items:flex-start;padding-top:13vh;animation:fadeIn .15s ease}
-.pal{width:min(620px,92vw);background:rgba(24,24,28,.92);backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);border:1px solid rgba(255,255,255,.08);border-radius:14px;overflow:hidden;
-  box-shadow:0 50px 100px -30px rgba(0,0,0,.9),0 0 0 1px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);animation:palIn .22s cubic-bezier(.2,1.2,.4,1)}
+.pal-scrim{position:fixed;inset:0;z-index:70;background:rgb(0 0 0 / calc(.55 * var(--shk)));backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;justify-content:center;align-items:flex-start;padding-top:13vh;animation:fadeIn .15s ease}
+.pal{width:min(620px,92vw);background:rgb(var(--glass) / .92);backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);border:1px solid rgb(var(--hi) / .08);border-radius:14px;overflow:hidden;
+  box-shadow:0 50px 100px -30px rgb(0 0 0 / calc(.9 * var(--shk))),0 0 0 1px rgb(0 0 0 / calc(.5 * var(--shk))),inset 0 1px 0 rgb(var(--hi) / .05);animation:palIn .22s cubic-bezier(.2,1.2,.4,1)}
 @keyframes palIn{from{opacity:0;transform:translateY(-8px) scale(.97)}}
-.pal-q{display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid rgba(255,255,255,.06)}
+.pal-q{display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid rgb(var(--hi) / .06)}
 .pal-q svg{width:18px;height:18px;color:var(--accent-2);flex:none}
 .pal-q input{height:56px;border:0;background:none;font-size:17px;padding:0}
 .pal-q input:focus{box-shadow:none}
@@ -4447,26 +4615,26 @@ h1{font-variation-settings:"wght" 760;letter-spacing:-.7px}
 .pi .pt{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pi .ps{font-size:12.5px;color:var(--faint);margin-left:auto;white-space:nowrap;padding-left:12px}
 .pi mark{background:none;color:var(--accent-2)}
-.pi.sel{background:linear-gradient(90deg,rgba(215,38,61,.2),rgba(215,38,61,.06));color:var(--text);box-shadow:inset 2px 0 0 var(--accent-2)}
+.pi.sel{background:linear-gradient(90deg,rgb(var(--acc) / .2),rgb(var(--acc) / .06));color:var(--text);box-shadow:inset 2px 0 0 var(--accent-2)}
 .pi.sel .pico{background:var(--accent);color:#fff}
-.pal-foot{display:flex;gap:16px;padding:9px 16px;border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:var(--faint)}
+.pal-foot{display:flex;gap:16px;padding:9px 16px;border-top:1px solid rgb(var(--hi) / .06);font-size:12px;color:var(--faint)}
 .pal-foot kbd{margin:0 4px 0 0}
 .pal-none{padding:22px 16px;color:var(--faint);text-align:center}
 
 /* switches instead of checkboxes */
 .check input[type=checkbox]{appearance:none;-webkit-appearance:none;width:36px;height:21px;border-radius:21px;background:var(--stone-3);border:1px solid var(--edge);position:relative;cursor:pointer;flex:none;margin:0;
   transition:background .22s,border-color .22s,box-shadow .22s}
-.check input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#cfccd2;box-shadow:0 1px 3px rgba(0,0,0,.5);transition:transform .25s cubic-bezier(.3,1.5,.5,1),background .2s}
-.check input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent-2);box-shadow:0 0 14px -2px rgba(236,58,80,.6)}
+.check input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--knob);box-shadow:0 1px 3px rgb(0 0 0 / calc(.5 * var(--shk)));transition:transform .25s cubic-bezier(.3,1.5,.5,1),background .2s}
+.check input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent-2);box-shadow:0 0 14px -2px rgb(var(--acc2) / .6)}
 .check input[type=checkbox]:checked::after{transform:translateX(15px);background:#fff}
-.check:hover input[type=checkbox]:not(:checked){border-color:#4b4b55}
+.check:hover input[type=checkbox]:not(:checked){border-color:var(--edge-2)}
 .check{gap:10px}
 
 /* dropdowns with a chevron */
 select{appearance:none;-webkit-appearance:none;padding-right:34px;cursor:pointer;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a9a6ad' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat:no-repeat;background-position:right 12px center}
-select:hover{border-color:#4b4b55}
+select:hover{border-color:var(--edge-2)}
 select option{background:var(--stone-2)}
 
 /* button ripple */
@@ -4477,20 +4645,20 @@ select option{background:var(--stone-2)}
 
 /* frosted page bar on scroll */
 .topbar{position:fixed;top:0;left:232px;right:0;z-index:30;height:56px;display:flex;align-items:center;gap:14px;padding:0 48px;
-  background:rgba(19,19,22,.72);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgba(255,255,255,.06);
-  box-shadow:0 12px 30px -18px rgba(0,0,0,.8);transform:translateY(-102%);transition:transform .32s cubic-bezier(.2,.9,.3,1)}
+  background:rgb(var(--glass) / .72);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgb(var(--hi) / .06);
+  box-shadow:0 12px 30px -18px rgb(0 0 0 / calc(.8 * var(--shk)));transform:translateY(-102%);transition:transform .32s cubic-bezier(.2,.9,.3,1)}
 .topbar.show{transform:none}
 .topbar .tt{font:800 17px/1 var(--display);letter-spacing:-.2px;opacity:0;transform:translateY(8px) scale(1.25);transform-origin:left center;transition:opacity .3s .05s,transform .4s .05s cubic-bezier(.2,.9,.3,1)}
 .topbar.show .tt{opacity:1;transform:none}
 .topbar .top-up{margin-left:auto}
 
 /* live install view */
-.live{display:flex;gap:20px;align-items:flex-start;padding:18px 20px;border-radius:14px;background:var(--stone-2);border:1px solid #26262c}
+.live{display:flex;gap:20px;align-items:flex-start;padding:18px 20px;border-radius:14px;background:var(--stone-2);border:1px solid var(--line)}
 .ring{position:relative;width:74px;height:74px;flex:none}
 .ring svg{width:100%;height:100%;transform:rotate(-90deg)}
 .ring circle{fill:none;stroke-width:6}
-.ring .trk{stroke:#101013}
-.ring .arc{stroke:url(#ringGrad);stroke-linecap:round;stroke-dasharray:175.93;stroke-dashoffset:175.93;transition:stroke-dashoffset .5s cubic-bezier(.3,1,.5,1);filter:drop-shadow(0 0 6px rgba(236,58,80,.55))}
+.ring .trk{stroke:var(--deep)}
+.ring .arc{stroke:url(#ringGrad);stroke-linecap:round;stroke-dasharray:175.93;stroke-dashoffset:175.93;transition:stroke-dashoffset .5s cubic-bezier(.3,1,.5,1);filter:drop-shadow(0 0 6px rgb(var(--acc2) / .55))}
 .ring #ringPct{position:absolute;inset:0;display:grid;place-items:center;font:800 17px var(--display)}
 .ring.done .arc{stroke:var(--ready);filter:drop-shadow(0 0 6px rgba(69,185,124,.6))}
 .live .grow{flex:1;min-width:0}
@@ -4498,32 +4666,32 @@ select option{background:var(--stone-2)}
 .live .now{margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .livelist{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;max-height:132px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 75%,transparent)}
 .livelist:empty{display:none}
-.livelist span{font-size:12.5px;padding:4px 10px;border-radius:7px;background:#25252b;color:var(--text);display:inline-flex;align-items:center;gap:6px;animation:chipIn .4s cubic-bezier(.2,1.4,.4,1)}
+.livelist span{font-size:12.5px;padding:4px 10px;border-radius:7px;background:var(--slot);color:var(--text);display:inline-flex;align-items:center;gap:6px;animation:chipIn .4s cubic-bezier(.2,1.4,.4,1)}
 .livelist span::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--ready)}
 @keyframes chipIn{from{opacity:0;transform:translateY(6px) scale(.8)}}
 .progress .bar{display:none}
 
 /* hover labels on slots */
-#tip{position:fixed;z-index:80;pointer-events:none;max-width:260px;padding:8px 11px;border-radius:9px;background:rgba(14,14,17,.94);border:1px solid rgba(255,255,255,.08);
-  box-shadow:0 18px 40px -12px rgba(0,0,0,.9);font-size:12.5px;line-height:1.4;color:var(--muted);opacity:0;transform:translateY(4px);transition:opacity .14s,transform .18s}
+#tip{position:fixed;z-index:80;pointer-events:none;max-width:260px;padding:8px 11px;border-radius:9px;background:rgb(var(--glass) / .94);border:1px solid rgb(var(--hi) / .08);
+  box-shadow:0 18px 40px -12px rgb(0 0 0 / calc(.9 * var(--shk)));font-size:12.5px;line-height:1.4;color:var(--muted);opacity:0;transform:translateY(4px);transition:opacity .14s,transform .18s}
 #tip.on{opacity:1;transform:none}
 #tip b{display:block;color:var(--text);font-size:13.5px;margin-bottom:1px}
 #tip em{display:block;font-style:normal;color:var(--accent-2);margin-top:4px;font-size:12px}
 
 /* empty states */
-.empty .art{display:block;width:84px;height:84px;margin:0 auto 14px;image-rendering:pixelated;filter:drop-shadow(0 10px 18px rgba(0,0,0,.6))}
+.empty .art{display:block;width:84px;height:84px;margin:0 auto 14px;image-rendering:pixelated;filter:drop-shadow(0 10px 18px rgb(0 0 0 / calc(.6 * var(--shk))))}
 .empty .art .bob{animation:bob 3.2s ease-in-out infinite}
 @keyframes bob{50%{transform:translateY(-3px)}}
 
 /* start-up splash */
 .cell.flash .slot{animation:flash 1.4s ease}
-@keyframes flash{0%,60%{box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),0 0 0 3px var(--accent-2),0 0 26px rgba(236,58,80,.6)}}
+@keyframes flash{0%,60%{box-shadow:inset 3px 3px 0 rgb(0 0 0 / calc(.6 * var(--shk))),0 0 0 3px var(--accent-2),0 0 26px rgb(var(--acc2) / .6)}}
 /* ModHub changelog */
 .wn-fab{position:fixed;right:22px;bottom:22px;z-index:25;display:flex;align-items:center;gap:8px;height:40px;padding:0 15px 0 12px;border-radius:20px;cursor:pointer;
-  border:1px solid rgba(255,255,255,.08);background:rgba(28,28,33,.82);backdrop-filter:blur(12px) saturate(140%);-webkit-backdrop-filter:blur(12px) saturate(140%);
-  color:var(--muted);font-weight:650;font-size:13.5px;box-shadow:0 14px 34px -14px rgba(0,0,0,.9);transition:color .2s,border-color .2s,transform .2s,box-shadow .25s}
+  border:1px solid rgb(var(--hi) / .08);background:rgb(var(--glass) / .82);backdrop-filter:blur(12px) saturate(140%);-webkit-backdrop-filter:blur(12px) saturate(140%);
+  color:var(--muted);font-weight:650;font-size:13.5px;box-shadow:0 14px 34px -14px rgb(0 0 0 / calc(.9 * var(--shk)));transition:color .2s,border-color .2s,transform .2s,box-shadow .25s}
 .wn-fab svg{width:17px;height:17px;color:var(--accent-2);transition:transform .4s cubic-bezier(.3,1.6,.5,1)}
-.wn-fab:hover{color:var(--text);border-color:rgba(236,58,80,.45);transform:translateY(-2px);box-shadow:0 18px 40px -14px rgba(0,0,0,.9),0 0 22px -6px rgba(236,58,80,.5)}
+.wn-fab:hover{color:var(--text);border-color:rgb(var(--acc2) / .45);transform:translateY(-2px);box-shadow:0 18px 40px -14px rgb(0 0 0 / calc(.9 * var(--shk))),0 0 22px -6px rgb(var(--acc2) / .5)}
 .wn-fab:hover svg{transform:rotate(18deg) scale(1.12)}
 .wn-dot{position:absolute;top:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:var(--accent-2);border:2px solid var(--stone);animation:ping 1.8s ease-out infinite}
 .wn-pick{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 2px}
@@ -4534,7 +4702,7 @@ select option{background:var(--stone-2)}
 .wn-v::before{content:"";position:absolute;left:6px;top:10px;bottom:-4px;width:2px;background:var(--stone-3)}
 .wn-v:last-child::before{display:none}
 .wn-v::after{content:"";position:absolute;left:1px;top:4px;width:12px;height:12px;border-radius:3px;background:var(--stone-3);box-shadow:0 0 0 3px var(--stone-2)}
-.wn-v.fresh::after{background:var(--accent);box-shadow:0 0 0 3px var(--stone-2),0 0 14px rgba(236,58,80,.7)}
+.wn-v.fresh::after{background:var(--accent);box-shadow:0 0 0 3px var(--stone-2),0 0 14px rgb(var(--acc2) / .7)}
 .wn-v h4{margin:0 0 6px;font:800 16px/1.2 var(--display);display:flex;align-items:center;gap:10px}
 .wn-v h4 .now-tag{font:650 11.5px/1 var(--body);padding:4px 8px;border-radius:6px;background:var(--accent-tint);color:var(--accent-2)}
 .wn-v ul{margin:0;padding-left:18px;color:var(--muted);font-size:14px;line-height:1.55}
@@ -4550,8 +4718,86 @@ select option{background:var(--stone-2)}
 #splash .word{animation:rise .5s .3s cubic-bezier(.2,.9,.3,1) both}
 @keyframes tileIn{from{opacity:0;transform:scale(.2) rotate(-20deg)}}
 .brand .mark i{transition:transform .3s cubic-bezier(.3,1.6,.5,1)}
-.brand:hover .mark i:nth-child(1){transform:translate(-1px,-1px)} .brand:hover .mark i:nth-child(4){transform:translate(1px,1px)}
+.brand:hover .mark i:nth-child(1){transform:translate(-1.5px,-1.5px)} .brand:hover .mark i:nth-child(2){transform:translate(1.5px,-1.5px)}
+.brand:hover .mark i:nth-child(3){transform:translate(-1.5px,1.5px)} .brand:hover .mark i:nth-child(4){transform:translate(1.5px,1.5px)}
 
+
+
+/* ---------- discover ---------- */
+.disc-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:8px}
+.disc-for{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:14px;flex-wrap:wrap}
+.disc-for select{width:auto;height:36px;padding-left:10px}
+.disc-sec{margin-top:34px}
+.disc-sec > h3{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
+.disc-sec > h3 small{font:500 13.5px var(--body);color:var(--faint)}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.dcard{display:flex;flex-direction:column;gap:10px;padding:16px;border-radius:14px;background:var(--stone-2);border:1px solid var(--line);cursor:pointer;text-align:left;color:inherit;min-width:0;
+  transition:transform .25s cubic-bezier(.2,.8,.2,1),border-color .2s,box-shadow .25s}
+.dcard:hover{transform:translateY(-3px);border-color:var(--edge);box-shadow:0 18px 40px -22px rgb(0 0 0 / calc(.9 * var(--shk)))}
+.dcard .top{display:flex;gap:12px;align-items:center;min-width:0}
+.dcard .ico{width:46px;height:46px}
+.dcard .nm{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dcard .by{font-size:12.5px;color:var(--faint)}
+.dcard .ds{font-size:13.5px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.9em}
+.dcard .why{font-size:12.5px;color:var(--link);font-weight:600}
+.dcard .ft{display:flex;align-items:center;justify-content:space-between;margin-top:auto;font-size:12.5px;color:var(--faint)}
+.dcard.pick{background:linear-gradient(160deg,var(--accent-tint),var(--stone-2) 70%);border-color:var(--accent-edge)}
+.dskel{height:168px;border-radius:14px;background:linear-gradient(90deg,var(--stone-2) 0%,var(--stone-3) 50%,var(--stone-2) 100%);background-size:200% 100%;animation:shimmer 1.15s linear infinite}
+/* mod page */
+.modpage{width:min(880px,100%);max-height:min(88vh,980px);overflow:auto;padding:0}
+.mp-head{display:flex;gap:18px;align-items:center;padding:28px 30px 20px}
+.mp-head .ico{width:72px;height:72px;border-radius:14px;font-size:28px}
+.mp-head h2{margin:0;font:800 26px/1.15 var(--display)}
+.mp-head .sub{color:var(--muted);margin-top:4px}
+.mp-head .grow{flex:1;min-width:0}
+.mp-acts{display:flex;gap:8px;flex-wrap:wrap}
+.mp-status{margin:0 30px;display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:12px;background:var(--stone-3);font-size:14px}
+.mp-status b{font-weight:700}
+.mp-status.ok{background:color-mix(in srgb,var(--ready) 14%,var(--stone-2));color:var(--text)}
+.mp-status.no{background:color-mix(in srgb,var(--amber) 14%,var(--stone-2))}
+.mp-status .dot{width:9px;height:9px}
+.mp-gal{display:flex;gap:10px;overflow-x:auto;padding:20px 30px 4px;scroll-snap-type:x mandatory}
+.mp-gal img{height:190px;border-radius:10px;flex:none;scroll-snap-align:start;object-fit:cover;background:var(--stone-3);cursor:zoom-in}
+.mp-grid{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:28px;padding:20px 30px 30px}
+.mp-body{color:var(--muted);font-size:14.5px;line-height:1.65;min-width:0;overflow-wrap:anywhere}
+.mp-body h1,.mp-body h2,.mp-body h3{color:var(--text);font:700 17px/1.3 var(--display);margin:18px 0 6px;background:none;-webkit-text-fill-color:currentColor}
+.mp-body p{margin:0 0 10px}
+.mp-facts{display:grid;gap:14px;align-content:start;font-size:13.5px}
+.mp-facts dt{color:var(--faint);font-size:12.5px;margin-bottom:3px}
+.mp-facts dd{margin:0;color:var(--text)}
+.mp-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:7px;background:var(--stone-3);margin:0 4px 4px 0;font-size:12.5px;color:var(--text);border:0;cursor:pointer}
+.mp-chip.static{cursor:default}
+.mp-chip .ico{width:18px;height:18px;border-radius:4px;font-size:10px}
+.mp-zoom{position:fixed;inset:0;z-index:75;background:rgb(0 0 0 / .85);display:grid;place-items:center;cursor:zoom-out;animation:fadeIn .15s}
+.mp-zoom img{max-width:92vw;max-height:88vh;border-radius:10px}
+@media (max-width:760px){.mp-grid{grid-template-columns:1fr}}
+/* ---------- 3.0: themes and a calmer layout ---------- */
+.theming,.theming *{transition:background-color .35s ease,color .35s ease,border-color .35s ease,fill .35s ease !important}
+.set-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.set-l{width:64px;color:var(--muted);font-weight:600;font-size:14px}
+.swatches{display:flex;gap:14px;flex-wrap:wrap}
+.sw{display:flex;flex-direction:column;align-items:center;gap:6px;background:none;border:0;padding:0;color:var(--faint);font-size:12.5px;font-weight:600;cursor:pointer}
+.sw i{width:34px;height:34px;border-radius:10px;background:var(--sw);box-shadow:0 0 0 2px var(--stone),0 0 0 2px transparent;transition:box-shadow .25s,transform .25s cubic-bezier(.3,1.5,.5,1)}
+.sw:hover i{transform:translateY(-2px)}
+.sw.on i{box-shadow:0 0 0 2px var(--stone),0 0 0 4px var(--sw)}
+.sw.on{color:var(--text)}
+.settings{gap:0}
+.settings > section,.settings > details{padding:26px 0;border-top:1px solid var(--line)}
+.settings > section:first-child{border-top:0;padding-top:0}
+details.adv{display:grid;gap:14px}
+details.adv > summary{font:700 18px/1.3 var(--display);cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px}
+details.adv > summary::-webkit-details-marker{display:none}
+details.adv > summary::after{content:"";width:8px;height:8px;border-right:2px solid var(--faint);border-bottom:2px solid var(--faint);transform:rotate(-45deg);transition:transform .2s}
+details.adv[open] > summary::after{transform:rotate(45deg)}
+details.adv[open]{display:grid}
+details.adv[open] > *:not(summary){margin-top:14px}
+.inv-tools{display:flex;gap:10px;align-items:center}
+.boostbtn svg{color:var(--amber)}
+.side .foot{display:grid;gap:10px}
+:root[data-mode="light"] .mark i{background:#c9c8d1} :root[data-mode="light"] .mark i:nth-child(1){background:var(--accent)} :root[data-mode="light"] .mark i:nth-child(4){background:var(--tile)}
+:root[data-mode="light"] .slot{box-shadow:inset 3px 3px 0 rgb(0 0 0 / .14),inset -3px -3px 0 rgb(255 255 255 / .7)}
+:root[data-mode="light"] .modal,:root[data-mode="light"] .pal{box-shadow:0 30px 80px -24px rgb(20 20 30 / .35),0 0 0 1px rgb(0 0 0 / .06)}
+:root[data-mode="light"] .btn.go,:root[data-mode="light"] .nav.on{box-shadow:none}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none !important;transition:none !important}}
 </style>
 </head>
@@ -4564,6 +4810,9 @@ select option{background:var(--stone-2)}
     <button class="nav on" data-tab="library">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       Library<span class="n" id="navLib"></span></button>
+    <button class="nav" data-tab="discover">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></svg>
+      Discover</button>
     <button class="nav" data-tab="install">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 19h16"/></svg>
       Install</button>
@@ -4578,7 +4827,6 @@ select option{background:var(--stone-2)}
       Settings</button>
     <div class="foot">
       <button class="upd hidden" id="updPill"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg><span>Update to <b id="updVer"></b></span></button>
-      <span id="footNote">ModHub runs on your computer.</span><br><button id="quitBtn">Stop ModHub</button>
       <div class="version" id="verLabel"></div>
     </div>
   </aside>
@@ -4600,7 +4848,7 @@ select option{background:var(--stone-2)}
           <h1>Library</h1>
           <p class="lede">The mods, resource packs and shaders you always play with. Add them once, then install them into any Minecraft version.</p>
         </div>
-        <div class="actions"><button class="btn" onclick="openImport()">Import from a launcher</button><button class="btn" onclick="openFiles()">Add from CurseForge</button></div>
+        <div class="actions"><button class="btn" onclick="openImport()">Import from a launcher</button></div>
       </div>
 
       <div class="banner warn hidden" id="nativeBanner" style="margin:0 0 24px;border-left-color:var(--accent)">
@@ -4631,19 +4879,35 @@ select option{background:var(--stone-2)}
         </select>
       </div>
       <p class="help hidden" id="shaderHelp">Shaders need Iris to run (Oculus on Forge). ModHub adds it for you when you install. In game, turn shaders on under Options, Video Settings, Shader Packs.</p>
-      <p class="help">Found it on CurseForge instead? Download it there, then <a href="#" onclick="openFiles();return false">add the file</a> or drag it into this window.</p>
+      <p class="help">Found it on CurseForge? <a href="#" onclick="openFiles();return false">Add from CurseForge</a>, or drag the file into this window.</p>
       <div id="results"></div>
 
-      <div class="boost" id="boostCard">
-        <div class="bolt"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
-        <div class="grow"><b>Performance boost</b><p>Add a trusted set of mods that make Minecraft run faster and smoother.</p></div>
-        <button class="btn" id="boostBtn">Choose mods</button>
-      </div>
       <div class="inv-h">
         <h3 id="invTitle">Your mods</h3>
-        <input class="filter" id="libFilter" placeholder="Filter your mods" aria-label="Filter your mods">
+        <div class="inv-tools">
+          <button class="btn sm boostbtn" id="boostBtn" title="Add a trusted set of mods that make Minecraft run faster and smoother"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><span id="boostCard">Performance boost</span></button>
+          <input class="filter" id="libFilter" placeholder="Filter your mods" aria-label="Filter your mods">
+        </div>
       </div>
       <div class="inv" id="inv"></div>
+    </section>
+
+    <!-- DISCOVER -->
+    <section id="tab-discover" class="hidden">
+      <div class="page-h">
+        <div>
+          <h1>Discover</h1>
+          <p class="lede">Popular and freshly updated for your Minecraft version, plus picks that go with what you already have.</p>
+        </div>
+      </div>
+      <div class="disc-bar">
+        <div class="seg" id="discKind" role="tablist">
+          <button class="on" data-dkind="mod" role="tab">Mods</button><button data-dkind="resourcepack" role="tab">Resource packs</button><button data-dkind="shader" role="tab">Shaders</button>
+        </div>
+        <div class="disc-for">For Minecraft <select id="discVer" aria-label="Minecraft version"></select>
+          <span id="discLoaderWrap">with <select id="discLoader" aria-label="Loader"><option value="fabric">Fabric</option><option value="quilt">Quilt</option><option value="forge">Forge</option><option value="neoforge">NeoForge</option></select></span></div>
+      </div>
+      <div id="discOut"></div>
     </section>
 
     <!-- INSTALL -->
@@ -4712,7 +4976,7 @@ select option{background:var(--stone-2)}
 
         <div class="progress hidden" id="progress">
           <div class="live">
-            <div class="ring" id="ring"><svg viewBox="0 0 64 64"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec3a50"/><stop offset="1" stop-color="#a81a2d"/></linearGradient></defs><circle class="trk" cx="32" cy="32" r="28"/><circle class="arc" id="ringArc" cx="32" cy="32" r="28"/></svg><span id="ringPct">0%</span></div>
+            <div class="ring" id="ring"><svg viewBox="0 0 64 64"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--accent-2)"/><stop offset="1" style="stop-color:var(--accent-3)"/></linearGradient></defs><circle class="trk" cx="32" cy="32" r="28"/><circle class="arc" id="ringArc" cx="32" cy="32" r="28"/></svg><span id="ringPct">0%</span></div>
             <div class="grow"><b id="liveTitle">Installing</b><div class="now" id="now"></div><div class="livelist" id="liveList"></div></div>
           </div>
           <div class="bar"><div id="barFill"></div></div>
@@ -4749,24 +5013,16 @@ select option{background:var(--stone-2)}
     <section id="tab-settings" class="hidden">
       <div class="page-h"><div>
         <h1>Settings</h1>
-        <p class="lede">Saved on this computer in <code class="inline" id="dataDir"></code>.</p>
+        <p class="lede">Make ModHub look and work the way you like.</p>
       </div></div>
       <div class="settings">
         <section>
-          <h3>Launcher folders</h3>
-          <p class="help" style="margin:-6px 0 0">ModHub finds these on its own. Change them only if you moved a launcher.</p>
-          <div><label class="field-label">Minecraft Launcher (.minecraft)</label><input data-path="official"></div>
-          <div><label class="field-label">Prism Launcher data folder</label><input data-path="prism"></div>
-          <div><label class="field-label">Modrinth App data folder</label><input data-path="modrinth_app"></div>
-        </section>
-        <section>
-          <h3>Your library</h3>
-          <p class="help" style="margin:-6px 0 0">Save everything in one file: all your loadouts, the files you added yourself and your update setting. Restore it on another PC or after a reinstall. You can also drag a backup file onto ModHub.</p>
-          <div class="actions">
-            <button class="btn" id="bkSave">Save a backup</button>
-            <label class="btn" style="cursor:pointer">Restore from a backup<input type="file" id="bkFile" accept=".zip" hidden></label>
-          </div>
-          <div id="bkOut"></div>
+          <h3>Appearance</h3>
+          <div class="set-row"><span class="set-l">Mode</span>
+            <div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode">
+              <button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio">Match Windows</button>
+            </div></div>
+          <div class="set-row"><span class="set-l">Colour</span><div class="swatches" id="accentPick" role="radiogroup" aria-label="Colour theme"></div></div>
         </section>
         <section>
           <h3>Updates</h3>
@@ -4787,16 +5043,35 @@ select option{background:var(--stone-2)}
           </div>
         </section>
         <section>
-          <h3>App window</h3>
-          <p class="help" style="margin:-6px 0 0" id="windowMode"></p>
-          <div id="windowActions"></div>
+          <h3>Your library</h3>
+          <p class="help" style="margin:-6px 0 0">Save everything in one file: all your loadouts, the files you added yourself and your update setting. Restore it on another PC or after a reinstall. You can also drag a backup file onto ModHub.</p>
+          <div class="actions">
+            <button class="btn" id="bkSave">Save a backup</button>
+            <label class="btn" style="cursor:pointer">Restore from a backup<input type="file" id="bkFile" accept=".zip" hidden></label>
+          </div>
+          <div id="bkOut"></div>
         </section>
         <section>
-          <h3>App shortcut</h3>
-          <p class="help" style="margin:-6px 0 0" id="shortcutHelp"></p>
+          <h3>App</h3>
+          <p class="help" style="margin:-6px 0 0" id="windowMode"></p>
+          <div id="windowActions"></div>
+          <p class="help" style="margin:0" id="shortcutHelp"></p>
           <div><button class="btn" data-shortcut>Add shortcut</button></div>
         </section>
-        <div class="actions"><button class="btn go" id="saveSettings">Save settings</button></div>
+        <details class="adv">
+          <summary>Launcher folders</summary>
+          <p class="help">ModHub finds these on its own. Change them only if you moved a launcher.</p>
+          <div><label class="field-label">Minecraft Launcher (.minecraft)</label><input data-path="official"></div>
+          <div><label class="field-label">Prism Launcher data folder</label><input data-path="prism"></div>
+          <div><label class="field-label">Modrinth App data folder</label><input data-path="modrinth_app"></div>
+          <div class="actions"><button class="btn go" id="saveSettings">Save folders</button></div>
+        </details>
+        <section class="about">
+          <h3>About</h3>
+          <p class="help" style="margin:-6px 0 0">ModHub <span id="aboutVer"></span>. Your library and settings are saved on this computer in <code class="inline" id="dataDir"></code>.</p>
+          <p class="help" style="margin:0" id="quitHelp"></p>
+          <div class="actions"><button class="btn quiet" id="aboutNotes">What's new</button><button class="btn quiet" id="quitBtn">Stop ModHub</button></div>
+        </section>
       </div>
     </section>
   </main>
@@ -4838,6 +5113,11 @@ select option{background:var(--stone-2)}
 </div>
 
 <button class="wn-fab" id="wnFab" title="What's new in ModHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span>What's new</span><i class="wn-dot hidden" id="wnDot"></i></button>
+<!-- mod page -->
+<div class="scrim hidden" id="modModal" role="dialog" aria-modal="true" aria-labelledby="mpTitle">
+  <div class="modal modpage" id="mpBody"></div>
+</div>
+
 <!-- ModHub's own changelog -->
 <div class="scrim hidden" id="wnModal" role="dialog" aria-modal="true" aria-labelledby="wnTitle">
   <div class="modal" id="wnBody" style="width:min(600px,100%)"></div>
@@ -4915,7 +5195,7 @@ function toast(msg) {
 let portsPoll;
 function go(tab) {
   $$(".nav").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  ["library", "install", "instances", "ports", "settings"].forEach(t => {
+  ["library", "discover", "install", "instances", "ports", "settings"].forEach(t => {
     const el = $("#tab-" + t), show = t === tab;
     const wasHidden = el.classList.contains("hidden");
     el.classList.toggle("hidden", !show);
@@ -4926,6 +5206,7 @@ function go(tab) {
   if (tab === "ports") { loadPorts(); portsPoll = setInterval(loadPorts, 4000); }
   if (tab === "install" && S) { updateSteps(); loadCarry(); }
   if (tab === "instances" && S) renderInstances();
+  if (tab === "discover" && S && (!discData || discStale)) loadDiscover();
   window.scrollTo(0, 0);
 }
 $$(".nav").forEach(b => b.onclick = () => go(b.dataset.tab));
@@ -4936,6 +5217,7 @@ const isFav = m => S.favorites.some(f => f.source === m.source && String(f.id) =
 
 function renderInventory() {
   const all = S.favorites;
+  if (all.length) $("#starter").classList.add("hidden");
   if (typeof renderAppBits === "function" && $("#shortcutText").textContent) renderAppBits();
   $("#navLib").textContent = all.length || "";
   const lo = (S.loadouts || []).find(l => l.id === S.active_loadout);
@@ -4951,7 +5233,7 @@ function renderInventory() {
     const own = m.source === "local";
     const needs = own && !(m.files || []).length;
     return `
-    <div class="cell ${own ? "own" : ""}" data-k="${esc(m.source)}:${esc(m.id)}" data-tip="${esc(m.name)}" data-tip-d="${esc(m.desc || "")}" data-tip-h="${own ? "Click to see its files" : ""}" aria-label="${esc(m.name)}" ${own ? `data-own="${esc(m.id)}"` : ""}>
+    <div class="cell ${own ? "own" : ""}" data-k="${esc(m.source)}:${esc(m.id)}" data-tip="${esc(m.name)}" data-tip-d="${esc(m.desc || "")}" data-tip-h="${own ? "Click to see its files" : m.source === "modrinth" ? "Click to see its page" : ""}" aria-label="${esc(m.name)}" ${own ? `data-own="${esc(m.id)}"` : m.source === "modrinth" ? `data-mp="${esc(m.id)}"` : ""}>
       <div class="slot">
         ${safeUrl(m.icon) ? `<img src="${esc(m.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="letter">${esc((m.name || "?")[0])}</span>`}
         ${needs ? `<span class="badge" title="Add its file">File?</span>` : ""}
@@ -4981,6 +5263,7 @@ function renderInventory() {
     renderInventory(); renderResults(); renderStarter(); toast(`Removed ${item.name}`);
   });
   $$("[data-own]").forEach(c => c.onclick = () => openItem(c.dataset.own));
+  $$("#inv [data-mp]").forEach(c => c.onclick = e => { if (e.target.closest(".rm")) return; const m = S.favorites.find(f => f.source === "modrinth" && String(f.id) === c.dataset.mp); if (m) openModPage(m); });
   if (typeof stagger === "function") stagger($("#inv"), ".cell", true);
 }
 function setKind(k) {
@@ -4988,7 +5271,7 @@ function setKind(k) {
   $$("#kindSeg button").forEach(b => { b.classList.toggle("on", b.dataset.kind === k); b.setAttribute("aria-selected", b.dataset.kind === k); });
   $("#q").placeholder = `Search Modrinth for ${KIND[k].many}`;
   $("#shaderHelp").classList.toggle("hidden", k !== "shader");
-  $("#boostCard").classList.toggle("hidden", k !== "mod");
+  $("#boostBtn").classList.toggle("hidden", k !== "mod");
   $("#searchLoader").classList.toggle("hidden", k !== "mod");
   lastResults = []; $("#results").innerHTML = "";
   if ($("#q").value.trim()) search();
@@ -5005,7 +5288,7 @@ function renderResults() {
     ${lastResults.map((m, i) => `
       <div class="res">${ico(m)}
         <div class="body">
-          <div class="t">${link(m, esc(m.name))} ${srcLabel(m.source)}</div>
+          <div class="t"><button class="linkbtn mp-open" data-mpi="${i}">${esc(m.name)}</button> ${srcLabel(m.source)}</div>
           <div class="d">${esc(m.desc)}</div>
           <div class="m">${m.author ? "by " + esc(m.author) + ", " : ""}${fmt(m.downloads)} downloads</div>
         </div>
@@ -5014,6 +5297,7 @@ function renderResults() {
       </div>`).join("")}
   </div>`;
   if (typeof stagger === "function") stagger($("#results"), ".res");
+  $$("#results [data-mpi]").forEach(b => b.onclick = () => openModPage(lastResults[+b.dataset.mpi]));
   $("#clearRes").onclick = () => { lastResults = []; $("#results").innerHTML = ""; $("#q").value = ""; $("#q").focus(); };
   $$("[data-add]").forEach(b => b.onclick = async () => {
     b.disabled = true;
@@ -5049,7 +5333,7 @@ $("#searchLoader").onchange = search;
 function openModal(id) { $(id).classList.remove("hidden"); }
 function closeModals() { $$(".scrim").forEach(m => m.classList.add("hidden")); }
 document.addEventListener("click", e => { if (e.target.matches("[data-close]") || e.target.classList.contains("scrim")) closeModals(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeModals(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { const z = $(".mp-zoom"); if (z) { z.remove(); return; } closeModals(); } });
 
 const FOLDER_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
 let modFolders = null;
@@ -5742,7 +6026,8 @@ function burst(fromEl) {
   document.body.appendChild(c);
   const ctx = c.getContext("2d"); ctx.scale(devicePixelRatio, devicePixelRatio);
   const r = fromEl.getBoundingClientRect(), ox = r.left + r.width / 2, oy = r.top + r.height / 2;
-  const colors = ["#d7263d", "#ec3a50", "#f3f1ef", "#45b97c", "#7a7780"];
+  const cv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const colors = [cv("--accent"), cv("--accent-2"), cv("--text"), "#45b97c", "#7a7780"];
   const parts = Array.from({length: 70}, () => {
     const a = -Math.PI / 2 + (Math.random() - .5) * 2.4, v = 5 + Math.random() * 8;
     return {x: ox, y: oy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, s: 4 + Math.random() * 6, r: Math.random() * 6, vr: (Math.random() - .5) * .4, c: colors[Math.random() * colors.length | 0]};
@@ -6178,6 +6463,7 @@ function showJustUpdated(ju) {
   if (!showWhatsNew(list, `ModHub updated to ${ju.to}`, `Here's what's new since ${ju.from}.`, list.map(e => e.version))) toast(`Updated to ModHub ${ju.to}`);
 }
 $("#updNotes").onclick = () => showHistory();
+$("#aboutNotes").onclick = () => showHistory();
 $("#updPeek").onclick = () => {
   const u = S.update; if (!u) return;
   showWhatsNew(u.changes, `What's coming in ModHub ${u.version}`, `You're on ${S.version}. Updating keeps your library and settings.`, (u.changes || []).map(e => e.version),
@@ -6275,7 +6561,7 @@ function renderAppBits() {
   $("#shortcutHelp").textContent = `Adds ModHub to ${shortcutWhere()}. If you move modhub.py, add the shortcut again.`;
   $("#shortcutBanner").classList.toggle("hidden", !!S.shortcut_done || !S.favorites.length);
   renderWindowBits();
-  $("#footNote").textContent = S.in_window ? "Closing this window stops ModHub." : "ModHub runs on your computer.";
+  $("#quitHelp").textContent = S.in_window ? "Closing the ModHub window also stops it." : "ModHub keeps running in the background until you stop it.";
 }
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-shortcut]"); if (!b) return;
@@ -6292,6 +6578,7 @@ $("#shortcutLater").onclick = async () => { S.shortcut_done = true; renderAppBit
 /* ---------- settings ---------- */
 function renderSettings() {
   $("#dataDir").textContent = S.data_dir;
+  $("#aboutVer").textContent = S.version;
   $$("[data-path]").forEach(i => { i.value = S.paths[i.dataset.path] || ""; i.placeholder = S.default_paths[i.dataset.path] || ""; });
 }
 $("#saveSettings").onclick = async () => {
@@ -6301,11 +6588,11 @@ $("#saveSettings").onclick = async () => {
   btn.disabled = true; btn.textContent = "Saving...";
   try {
     S = await api("/api/settings", body);
-    renderAll(); toast("Settings saved");
+    renderAll(); toast("Folders saved");
   } catch (e) {
     toast(e.message);
   }
-  btn.disabled = false; btn.textContent = "Save settings";
+  btn.disabled = false; btn.textContent = "Save folders";
 };
 
 $("#quitBtn").onclick = async () => {
@@ -6406,10 +6693,10 @@ function emptyArt(kind) {
     anvil: ["................", "................", ".KKKKKKKKKKKKK..", "KAAAAAAAAAAAAAK.", "KAaaaaaaaaaaaAK.", ".KKKKAAAAAKKKK..", "....KAaaaAK.....",
             "....KAaaaAK.....", "...KKAAAAAKK....", "..KAAAAAAAAAK...", "..KAaaaaaaaaAK..", "..KKKKKKKKKKKK..", "................", "................"],
   };
-  const C = {K: "#121216", b: "#3b3b44", B: "#2b2b32", G: "#d7263d", A: "#4a4a53", a: "#34343b"};
+  const C = {K: "#121216", b: "#3b3b44", B: "#2b2b32", G: getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#d7263d", A: "#4a4a53", a: "#34343b"};
   let rects = "";
   ART[kind].forEach((row, y) => [...row].forEach((ch, x) => { if (C[ch]) rects += `<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${C[ch]}"/>`; }));
-  const sparks = kind === "anvil" ? `<g class="bob"><rect x="12" y="0" width="1" height="1" fill="#ec3a50"/><rect x="14" y="1" width="1" height="1" fill="#f0a43a"/><rect x="11" y="1" width="1" height="1" fill="#f0a43a" opacity=".6"/></g>` : "";
+  const sparks = kind === "anvil" ? `<g class="bob"><rect x="12" y="0" width="1" height="1" style="fill:var(--accent-2)"/><rect x="14" y="1" width="1" height="1" fill="#f0a43a"/><rect x="11" y="1" width="1" height="1" fill="#f0a43a" opacity=".6"/></g>` : "";
   return `<svg class="art" viewBox="0 0 16 14" shape-rendering="crispEdges" aria-hidden="true">${rects}${sparks}</svg>`;
 }
 
@@ -6427,7 +6714,7 @@ const after = fn => setTimeout(fn, 260);
 function palItems(q) {
   const out = [];
   const add = (g, t, run, o = {}) => out.push({g, t, run, s: o.s || "", ico: o.ico || "", rank: o.rank || 0});
-  [["library", "Library"], ["install", "Install"], ["instances", "Instances"], ["ports", "Ports"], ["settings", "Settings"]]
+  [["library", "Library"], ["discover", "Discover"], ["install", "Install"], ["instances", "Instances"], ["ports", "Ports"], ["settings", "Settings"]]
     .forEach(([id, n]) => add("Pages", n, () => go(id), {ico: navIcon(id), s: "Page"}));
   const live = (S.installs || []).filter(r => !r.export);
   add("Actions", "Install my mods", () => go("install"), {ico: navIcon("install")});
@@ -6436,6 +6723,10 @@ function palItems(q) {
   add("Actions", "Add files from CurseForge", () => openFiles(), {ico: ICON.file});
   add("Actions", "New loadout", () => openLoadout(), {ico: ICON.plus});
   add("Actions", "Save a library backup", () => { go("settings"); after(() => $("#bkSave").click()); }, {ico: ICON.save});
+  const dark = document.documentElement.dataset.mode !== "light";
+  add("Actions", dark ? "Switch to light mode" : "Switch to dark mode", () => setTheme({mode: dark ? "light" : "dark"}), {ico: ICON.swap});
+  if (q) ACCENTS.filter(a => a[0] !== (S.theme || {}).accent).forEach(([id, n, c]) =>
+    add("Colours", `${n} colour theme`, () => setTheme({accent: id}), {ico: `<i style="width:14px;height:14px;border-radius:4px;background:${c}"></i>`}));
   add("Actions", "What's new in ModHub", () => showHistory(), {ico: ICON.file, s: `Version ${S.version}`});
   add("Actions", "Check for ModHub updates", () => { go("settings"); after(() => $("#updCheck").click()); }, {ico: ICON.search});
   (S.loadouts || []).filter(l => l.id !== S.active_loadout).forEach(l =>
@@ -6445,11 +6736,7 @@ function palItems(q) {
   if (q) {
     S.favorites.forEach(m => add("Your library", m.name, () => {
       if (m.source === "local") { openItem(m.id); return; }
-      go("library"); setKind(m.kind || "mod");
-      after(() => {
-        const c = $(`.cell[data-k="${CSS.escape(m.source + ":" + m.id)}"]`);
-        if (c) { c.scrollIntoView({block: "center", behavior: REDUCED ? "auto" : "smooth"}); c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash"); }
-      });
+      openModPage(m);
     }, {ico: ico(m, "x").replace(/^<div class="x">|<\/div>$/g, ""), s: KIND_LABEL[m.kind || "mod"]}));
   }
   return out;
@@ -6472,7 +6759,7 @@ function palRender() {
   let items = palItems(q);
   if (q) {
     items = items.map(x => ({...x, rank: palScore(x.t, q)})).filter(x => x.rank >= 0);
-    const order = ["Pages", "Actions", "Loadouts", "Instances", "Your library"];
+    const order = ["Pages", "Actions", "Loadouts", "Instances", "Colours", "Your library"];
     items.sort((a, b) => b.rank - a.rank || order.indexOf(a.g) - order.indexOf(b.g));
     items = items.slice(0, 12);
     items.push({g: "Modrinth", t: `Search Modrinth for "${$("#palQ").value.trim()}"`, ico: ICON.search, s: "Library", run: () => { go("library"); $("#q").value = $("#palQ").value.trim(); search(); }});
@@ -6527,10 +6814,163 @@ function hideSplash() {
 }
 setTimeout(hideSplash, 4000);
 
-function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
+/* ---------- discover ---------- */
+let discKind = "mod", discSeq = 0, discData = null, discStale = true;
+const LOADER_LABEL = {fabric: "Fabric", quilt: "Quilt", forge: "Forge", neoforge: "NeoForge"};
+function discOptions() {
+  const list = (S.versions || []).filter(v => v.type === "release").slice(0, 40).map(v => v.v);
+  const want = $("#discVer").value || getVersion() || list[0] || "";
+  if (want && !list.includes(want)) list.unshift(want);
+  $("#discVer").innerHTML = list.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  if (want) $("#discVer").value = want;
+  if (!$("#discLoader").dataset.set) $("#discLoader").value = loader || "fabric";
+}
+async function loadDiscover() {
+  discOptions(); discStale = false;
+  $("#discLoaderWrap").classList.toggle("hidden", discKind !== "mod");
+  const seq = ++discSeq, out = $("#discOut");
+  out.innerHTML = `<div class="disc-sec"><div class="dgrid">${Array.from({length: 8}, () => `<div class="dskel"></div>`).join("")}</div></div>`;
+  try {
+    const d = await api("/api/discover", {kind: discKind, version: $("#discVer").value, loader: $("#discLoader").value});
+    if (seq !== discSeq) return;
+    discData = d; renderDiscover();
+  } catch (e) {
+    if (seq !== discSeq) return;
+    out.innerHTML = `<div class="banner err"><div class="grow"><b>Couldn't load Discover</b><p>${esc(e.message)}</p></div><button class="btn sm" id="discRetry">Try again</button></div>`;
+    $("#discRetry").onclick = loadDiscover;
+  }
+}
+function dcard(m, i, pick) {
+  return `<div class="dcard ${pick ? "pick" : ""}" data-dk="${i}" role="button" tabindex="0" aria-label="${esc(m.name)}">
+    <div class="top">${ico(m)}<div style="min-width:0"><div class="nm">${esc(m.name)}</div><div class="by">${m.author ? "by " + esc(m.author) : "Modrinth"}</div></div></div>
+    ${pick && m.why ? `<div class="why">${esc(m.why)}</div>` : `<div class="ds">${esc(m.desc)}</div>`}
+    <div class="ft"><span>${fmt(m.downloads)} downloads</span>${isFav(m) ? `<span class="added"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M2 7.5l3 3 7-7"/></svg>In library</span>` : `<button class="btn sm go" data-dadd>Add</button>`}</div>
+  </div>`;
+}
+function renderDiscover() {
+  const d = discData; if (!d) return;
+  const v = esc($("#discVer").value), K = {mod: "mods", resourcepack: "resource packs", shader: "shaders"}[discKind];
+  const all = [];
+  const sec = (title, small, list, pick) => list && list.length ? `<div class="disc-sec"><h3>${title}<small>${small}</small></h3><div class="dgrid">${list.map(m => { all.push(m); return dcard(m, all.length - 1, pick); }).join("")}</div></div>` : "";
+  const ids = new Set((d.popular || []).map(m => m.id));
+  let h = sec("Goes with your library", "Picked for what you already have", d.picks, true)
+        + sec(`Popular for ${v}`, `The most followed ${K} that are out for ${v}`, d.popular)
+        + sec("Recently updated", `Just updated for ${v}`, (d.updated || []).filter(m => !ids.has(m.id)));
+  if (!h) h = `<div class="empty" style="margin-top:24px">${emptyArt("chest")}<h3>Nothing out for ${v} yet</h3><p>Mods take a little while to catch up after a new Minecraft version. Try an earlier version, or check back in a few days.</p></div>`;
+  $("#discOut").innerHTML = h;
+  stagger($("#discOut"), ".dcard");
+  $$("#discOut [data-dk]").forEach(c => {
+    const m = all[+c.dataset.dk];
+    c.onclick = e => { const b = e.target.closest("[data-dadd]"); if (b) addToLibrary(m, b); else openModPage(m); };
+    c.onkeydown = e => { if (e.key === "Enter" && e.target === c) openModPage(m); };
+  });
+}
+async function addToLibrary(m, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    S.favorites = (await api("/api/favorites/add", {mod: {source: "modrinth", id: m.id, slug: m.slug, name: m.name, desc: m.desc, icon: m.icon, url: m.url, kind: m.kind || "mod"}})).favorites;
+    renderInventory(); if (discData) renderDiscover(); if (lastResults.length) renderResults();
+    toast(`Added ${m.name} to your library`);
+    return true;
+  } catch (e) { toast(e.message); if (btn) btn.disabled = false; return false; }
+}
+$$("#discKind button").forEach(b => b.onclick = () => { discKind = b.dataset.dkind; $$("#discKind button").forEach(x => x.classList.toggle("on", x === b)); settle(); loadDiscover(); });
+$("#discVer").onchange = loadDiscover;
+$("#discLoader").onchange = () => { $("#discLoader").dataset.set = "1"; loadDiscover(); };
+
+/* ---------- mod pages ---------- */
+let mpSeq = 0;
+function pageContext() {
+  const onDisc = !$("#tab-discover").classList.contains("hidden");
+  return onDisc ? {version: $("#discVer").value, loader: $("#discLoader").value} : {version: getVersion(), loader: loader || "fabric"};
+}
+function plainBody(md) {
+  return (md || "").replace(/<!--[\s\S]*?-->/g, "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h\d|li)>/gi, "\n").replace(/<[^>]+>/g, "")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/&nbsp;/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+async function openModPage(m) {
+  const ctx = pageContext(), seq = ++mpSeq;
+  $("#mpBody").innerHTML = `<div class="mp-head">${ico(m)}<div class="grow"><h2 id="mpTitle">${esc(m.name)}</h2><div class="sub"><span class="spin"></span>&nbsp; Loading its page</div></div></div><div style="padding:0 30px 30px"><div class="dskel" style="height:190px"></div></div>`;
+  openModal("#modModal");
+  try {
+    const p = await api("/api/project", {id: m.id, version: ctx.version, loader: ctx.loader});
+    if (seq === mpSeq) renderModPage(p, ctx);
+  } catch (e) {
+    if (seq === mpSeq) $("#mpBody").innerHTML = `<div class="mp-head"><div class="grow"><h2 id="mpTitle">${esc(m.name)}</h2></div></div><div style="padding:0 30px 30px"><div class="banner err" style="margin:0"><div class="grow"><b>Couldn't load this page</b><p>${esc(e.message)}</p></div></div><div class="foot"><button class="btn" data-close>Close</button></div></div>`;
+  }
+}
+function renderModPage(p, ctx) {
+  const fav = isFav(p), kind = p.kind || "mod", v = esc(ctx.version || "");
+  const ldr = kind === "mod" ? ` with ${LOADER_LABEL[ctx.loader] || ""}` : "";
+  const status = !ctx.version ? "" : p.ready
+    ? `<div class="mp-status ok"><span class="dot" style="background:var(--ready)"></span><span><b>Ready for Minecraft ${v}</b>${esc(ldr)}. Version ${esc(p.ready.version)}${p.ready.type !== "release" ? " (beta)" : ""}.</span></div>`
+    : `<div class="mp-status no"><span class="dot" style="background:var(--amber)"></span><span><b>Not out for Minecraft ${v}${esc(ldr)} yet.</b> ${p.newest_mc ? `It supports up to ${esc(p.newest_mc)}. ` : ""}${fav ? "ModHub tells you when it comes out." : "Add it anyway and ModHub tells you when it comes out."}</span></div>`;
+  const body = plainBody(p.body);
+  const short = body.length > 4000 ? body.slice(0, 4000).replace(/\s+\S*$/, "") + "..." : body;
+  const links = Object.entries(p.links || {}).map(([k, u]) => `<a class="mp-chip" href="${esc(u)}" target="_blank" rel="noopener">${{source_url: "Source code", issues_url: "Report a bug", wiki_url: "Wiki", discord_url: "Discord"}[k]}</a>`).join("");
+  $("#mpBody").innerHTML = `
+    <div class="mp-head">${ico(p)}
+      <div class="grow"><h2 id="mpTitle">${esc(p.name)}</h2><div class="sub">${esc(p.desc)}</div>${p.author ? `<div class="help" style="margin-top:4px">by ${esc(p.author)}</div>` : ""}</div>
+    </div>
+    <div class="mp-acts" style="padding:0 30px 18px">
+      ${fav ? `<span class="added"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M2 7.5l3 3 7-7"/></svg>In your library</span>` : `<button class="btn go" id="mpAdd">Add to my library</button>`}
+      ${safeUrl(p.url) ? `<a class="btn quiet" href="${esc(p.url)}" target="_blank" rel="noopener">Open on Modrinth</a>` : ""}
+      <button class="btn quiet" data-close style="margin-left:auto">Close</button>
+    </div>
+    ${status}
+    ${p.gallery.length ? `<div class="mp-gal">${p.gallery.map(g => `<img src="${esc(g.url)}" alt="${esc(g.title)}" loading="lazy" referrerpolicy="no-referrer" data-zoom>`).join("")}</div>` : ""}
+    <div class="mp-grid">
+      <div class="mp-body">${body ? mdLite(short).replace("<div>No notes for this update.</div>", "") : `<p>${esc(p.desc)}</p>`}
+        ${body.length > 4000 && safeUrl(p.url) ? `<p style="margin-top:12px"><a href="${esc(p.url)}" target="_blank" rel="noopener">Read the full description on Modrinth</a></p>` : ""}</div>
+      <dl class="mp-facts">
+        <div><dt>Downloads</dt><dd>${fmt(p.downloads)}, followed by ${fmt(p.followers)}</dd></div>
+        ${p.needs.length ? `<div><dt>Needs</dt><dd>${p.needs.map((n, i) => `<button class="mp-chip" data-need="${i}">${ico(n)}${esc(n.name)}</button>`).join("")}</dd></div>` : ""}
+        ${kind === "mod" && p.loaders.length ? `<div><dt>Works with</dt><dd>${p.loaders.filter(l => LOADER_LABEL[l]).map(l => LOADER_LABEL[l]).join(", ") || esc(p.loaders.join(", "))}</dd></div>` : ""}
+        ${p.newest_mc ? `<div><dt>Newest Minecraft</dt><dd>${esc(p.newest_mc)}</dd></div>` : ""}
+        ${p.categories.length ? `<div><dt>Tags</dt><dd>${p.categories.map(c => `<span class="mp-chip static">${esc(c.replace(/-/g, " "))}</span>`).join("")}</dd></div>` : ""}
+        ${p.license ? `<div><dt>Licence</dt><dd>${esc(p.license)}</dd></div>` : ""}
+        ${p.updated ? `<div><dt>Last updated</dt><dd>${esc(timeAgo(p.updated))}</dd></div>` : ""}
+        ${links ? `<div><dt>Links</dt><dd>${links}</dd></div>` : ""}
+      </dl>
+    </div>`;
+  $("#mpBody").scrollTop = 0;
+  if ($("#mpAdd")) $("#mpAdd").onclick = async () => { if (await addToLibrary(p, $("#mpAdd"))) renderModPage(p, ctx); };
+  $$("#mpBody [data-need]").forEach(b => b.onclick = () => openModPage(p.needs[+b.dataset.need]));
+  $$("#mpBody [data-zoom]").forEach(img => img.onclick = () => {
+    const z = document.createElement("div"); z.className = "mp-zoom"; z.innerHTML = `<img src="${esc(img.src)}" alt="${esc(img.alt)}" referrerpolicy="no-referrer">`;
+    z.onclick = () => z.remove(); document.body.appendChild(z);
+  });
+}
+
+/* ---------- themes ---------- */
+const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["emerald", "Emerald", "#0e9e5a"], ["ocean", "Ocean", "#2563eb"], ["violet", "Violet", "#7c3aed"], ["amber", "Amber", "#ca7008"], ["rose", "Rose", "#d62976"]];
+const lightQuery = matchMedia("(prefers-color-scheme: light)");
+function applyTheme(t, animate = false) {
+  const d = document.documentElement;
+  if (animate && !REDUCED) { d.classList.add("theming"); setTimeout(() => d.classList.remove("theming"), 420); }
+  d.dataset.pref = t.mode; d.dataset.accent = t.accent;
+  d.dataset.mode = t.mode === "system" ? (lightQuery.matches ? "light" : "dark") : t.mode;
+}
+lightQuery.addEventListener("change", () => { if (S && S.theme && S.theme.mode === "system") applyTheme(S.theme, true); });
+function renderTheme() {
+  const t = S.theme || {mode: "dark", accent: "crimson"};
+  $$("#themeMode button").forEach(b => { b.classList.toggle("on", b.dataset.mode === t.mode); b.setAttribute("aria-checked", b.dataset.mode === t.mode); });
+  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}"><i></i>${n}</button>`).join("");
+  $$("#accentPick [data-accent]").forEach(b => b.onclick = () => setTheme({accent: b.dataset.accent}));
+  settle();
+}
+async function setTheme(patch) {
+  S.theme = {...(S.theme || {mode: "dark", accent: "crimson"}), ...patch};
+  applyTheme(S.theme, true); renderTheme();
+  try { S.theme = (await api("/api/theme", patch)).theme; } catch (e) { toast(e.message); }
+}
+$$("#themeMode button").forEach(b => b.onclick = () => setTheme({mode: b.dataset.mode}));
+
+function renderAll() { renderTheme(); renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
 (async function init() {
   S = await api("/api/state");
+  if (S.theme) applyTheme(S.theme);
   if (S.just_updated) { const ju = S.just_updated; setTimeout(() => showJustUpdated(ju), 1000); api("/api/update/dismiss_note").catch(() => {}); }
   const last = S.last || {};
   setLoader(last.loader || S.loader || "fabric");
