@@ -29,6 +29,7 @@ Options: --tab (open in a normal browser tab), --console (Windows: keep the cons
 Only needs Python 3.8+. No extra packages. Your library + settings live in ~/.modhub/
 """
 
+import ast
 import hashlib
 import json
 import os
@@ -52,7 +53,43 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
+# What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
+APP_CHANGES = [
+    {"version": "2.5", "notes": [
+        "New: What's new. After ModHub updates, it shows you what changed. Before you update, you can see what's coming.",
+        "The full history of ModHub updates is in Settings, under Updates.",
+    ]},
+    {"version": "2.4", "notes": [
+        "New: press Ctrl+K (or click Search in the sidebar) to jump to any page, mod, loadout or action.",
+        "Installs now show a progress ring, with each mod popping into a list as it lands.",
+        "Proper on/off switches, nicer dropdowns and a soft ripple on buttons.",
+        "The page title turns into a frosted bar when you scroll down.",
+        "Hover labels on mod slots, small pictures on empty pages, and an animated logo at start-up.",
+    ]},
+    {"version": "2.3", "notes": [
+        "New: What changed. After updating an instance, see each mod's own changelog.",
+        "New: save your whole library to one backup file and restore it on another PC.",
+    ]},
+    {"version": "2.2", "notes": [
+        "New: crash helper. When Minecraft crashes, ModHub finds the mod that caused it and offers a fix.",
+        "New: performance boost button that adds a trusted set of mods for more FPS.",
+        "New: bring your settings, keybinds and servers along to a new instance.",
+    ]},
+    {"version": "2.1", "notes": [
+        "New: ModHub checks that your mods work together and fixes what it can, like Sodium and Iris versions that clash.",
+        "A popup tells you about anything it couldn't fix, with a button to turn that mod off.",
+    ]},
+    {"version": "2.0", "notes": [
+        "New: loadouts, so you can keep different sets of mods, like PvP or Building.",
+        "New: Update my instances, to bring everything you installed up to date in one click.",
+        "ModHub tells you when a mod that wasn't ready for your version comes out.",
+    ]},
+    {"version": "1.x", "notes": [
+        "Resource packs and shaders, CurseForge file import, new Minecraft versions show up by themselves, "
+        "its own window, automatic updates from GitHub, and Port with Claude.",
+    ]},
+]
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
@@ -2556,6 +2593,30 @@ def update_search_dirs():
     return out
 
 
+def changes_in_text(text):
+    """Read APP_CHANGES out of another copy of ModHub without running it."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "APP_CHANGES" for t in node.targets):
+            try:
+                raw = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                return []
+            out = []
+            for e in raw if isinstance(raw, list) else []:
+                if isinstance(e, dict) and isinstance(e.get("version"), str) and isinstance(e.get("notes"), list):
+                    out.append({"version": e["version"][:20], "notes": [str(n)[:400] for n in e["notes"][:20]]})
+            return out[:50]
+    return []
+
+
+def changes_since(changes, version):
+    return [c for c in changes if c["version"][:1].isdigit() and version_tuple(c["version"]) > version_tuple(version)]
+
+
 def find_update(force=False):
     """Look for a newer modhub.py you downloaded, e.g. 'modhub (3).py' in Downloads."""
     if not force and time.time() - UPDATE_CACHE["at"] < 20:
@@ -2575,6 +2636,11 @@ def find_update(force=False):
                 if not best or version_tuple(got[0]) > version_tuple(best["version"]) or \
                         (got[0] == best["version"] and f.stat().st_mtime > Path(best["path"]).stat().st_mtime):
                     best = {"version": got[0], "path": str(f), "where": "online" if d == UPDATES_DIR else d.name}
+    if best:
+        try:
+            best["changes"] = changes_since(changes_in_text(Path(best["path"]).read_text("utf-8")), APP_VERSION)
+        except OSError:
+            best["changes"] = []
     UPDATE_CACHE.update(at=time.time(), found=best)
     return best
 
@@ -2705,6 +2771,10 @@ def apply_update(path_str):
         except OSError:
             pass
     UPDATE_CACHE.update(at=0, found=None)
+    if version_tuple(new_version) > version_tuple(APP_VERSION):
+        with CFG_LOCK:
+            CFG["just_updated"] = {"from": APP_VERSION, "to": new_version}
+            save_config(CFG)
     print(f"Updated ModHub {APP_VERSION} -> {new_version}")
     return new_version
 
@@ -2846,7 +2916,7 @@ def state():
             "data_dir": str(DATA_DIR), "in_window": APP["proc"] is not None or APP["webview"] is not None,
             "shortcut_done": bool(cfg.get("shortcut_done")), "platform": platform.system(),
             "native": APP["webview"] is not None, "webview_installed": has_webview(),
-            "native_broken": cfg.get("native_broken"), "version": APP_VERSION, "update": find_update(),
+            "native_broken": cfg.get("native_broken"), "version": APP_VERSION, "update": find_update(), "changelog": APP_CHANGES,
             "has_backup": any((DATA_DIR / "backups").glob("modhub-*.py")) if (DATA_DIR / "backups").is_dir() else False,
             "loadouts": loadouts_view(CFG), "active_loadout": cfg.get("active_loadout"),
             "installs": cfg.get("installs", []), "caught_up": cfg.get("caught_up", []),
@@ -4444,6 +4514,19 @@ select option{background:var(--stone-2)}
 /* start-up splash */
 .cell.flash .slot{animation:flash 1.4s ease}
 @keyframes flash{0%,60%{box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),0 0 0 3px var(--accent-2),0 0 26px rgba(236,58,80,.6)}}
+/* ModHub changelog */
+.wn{max-height:min(460px,58vh);overflow:auto;margin:14px -6px 0;padding:0 6px}
+.wn-v{position:relative;padding:0 0 18px 26px}
+.wn-v::before{content:"";position:absolute;left:6px;top:10px;bottom:-4px;width:2px;background:var(--stone-3)}
+.wn-v:last-child::before{display:none}
+.wn-v::after{content:"";position:absolute;left:1px;top:4px;width:12px;height:12px;border-radius:3px;background:var(--stone-3);box-shadow:0 0 0 3px var(--stone-2)}
+.wn-v.fresh::after{background:var(--accent);box-shadow:0 0 0 3px var(--stone-2),0 0 14px rgba(236,58,80,.7)}
+.wn-v h4{margin:0 0 6px;font:800 16px/1.2 var(--display);display:flex;align-items:center;gap:10px}
+.wn-v h4 .now-tag{font:650 11.5px/1 var(--body);padding:4px 8px;border-radius:6px;background:var(--accent-tint);color:var(--accent-2)}
+.wn-v ul{margin:0;padding-left:18px;color:var(--muted);font-size:14px;line-height:1.55}
+.wn-v li{margin:3px 0}
+.wn-v li::marker{color:var(--faint)}
+.wn-v.fresh li{color:var(--text)}
 #splash{position:fixed;inset:0;z-index:90;background:var(--deep);display:grid;place-items:center;pointer-events:none;transition:opacity .4s ease}
 #splash.out{opacity:0}
 #splash .in{display:flex;align-items:center;gap:14px;font:800 26px/1 var(--display)}
@@ -4674,6 +4757,7 @@ select option{background:var(--stone-2)}
         <section>
           <h3>Updates</h3>
           <p class="help" style="margin:-6px 0 0" id="updText"></p>
+          <button class="linkbtn hidden" id="updPeek" style="margin-top:6px"></button>
           <div class="autoupd">
             <label class="field-label" for="updSource">Get updates automatically from</label>
             <div class="picker"><input id="updSource" placeholder="yourname/modhub (a GitHub repo)"><button class="btn" id="updSourceSave">Save</button></div>
@@ -4684,6 +4768,7 @@ select option{background:var(--stone-2)}
             <button class="btn go hidden" id="updApply">Update now</button>
             <button class="btn" id="updCheck">Check for updates</button>
             <button class="btn" id="updFile">Install from a file</button>
+            <button class="btn quiet" id="updNotes">What's new</button>
             <button class="btn quiet hidden" id="updUndo">Go back to the previous version</button>
           </div>
         </section>
@@ -4736,6 +4821,11 @@ select option{background:var(--stone-2)}
 <!-- what changed -->
 <div class="scrim hidden" id="chgModal" role="dialog" aria-modal="true" aria-labelledby="chgTitle">
   <div class="modal" id="chgBody" style="width:min(680px,100%)"></div>
+</div>
+
+<!-- ModHub's own changelog -->
+<div class="scrim hidden" id="wnModal" role="dialog" aria-modal="true" aria-labelledby="wnTitle">
+  <div class="modal" id="wnBody" style="width:min(600px,100%)"></div>
 </div>
 
 <!-- problems popup -->
@@ -5506,6 +5596,9 @@ function renderUpdateBits() {
       ? `You're on ModHub ${S.version}, the newest version.`
       : `You're on ModHub ${S.version}. When you download a newer modhub.py, ModHub finds it in your Downloads folder and offers to update.`;
   }
+  const peek = $("#updPeek");
+  peek.classList.toggle("hidden", !(u && u.changes && u.changes.length));
+  if (u) peek.textContent = `See what's new in ${u.version}`;
   if (u && u.where === "online") $("#updText").textContent = `ModHub ${u.version} has been downloaded. ${S.update_auto ? "It installs by itself next time you open ModHub, or" : "You can"} update now.`;
   if (document.activeElement !== $("#updSource")) $("#updSource").value = S.update_source || "";
   $("#updAuto").checked = S.update_auto !== false;
@@ -6029,6 +6122,38 @@ function showChanges(updates, title) {
   return true;
 }
 
+/* ---------- ModHub's own changelog ---------- */
+function showWhatsNew(entries, title, lede, fresh = [], action = null) {
+  if (!entries || !entries.length) return false;
+  $("#wnBody").innerHTML = `
+    <h2 id="wnTitle">${esc(title)}</h2>
+    ${lede ? `<p class="lede">${esc(lede)}</p>` : ""}
+    <div class="wn">${entries.map(e => `<div class="wn-v ${fresh.includes(e.version) ? "fresh" : ""}">
+      <h4>ModHub ${esc(e.version)}${e.version === S.version ? `<span class="now-tag">You have this</span>` : ""}</h4>
+      <ul>${e.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul></div>`).join("")}</div>
+    <div class="foot">${action ? `<button class="btn" data-close>Not now</button><button class="btn go" id="wnGo">${esc(action.label)}</button>` : `<button class="btn go" data-close>Got it</button>`}</div>`;
+  openModal("#wnModal");
+  stagger($("#wnBody"), ".wn-v");
+  if (action) $("#wnGo").onclick = () => { closeModals(); action.run(); };
+  return true;
+}
+function showHistory() {
+  const log = S.changelog || [];
+  showWhatsNew(log, "What's new in ModHub", `You're on ModHub ${S.version}. Here's what each update brought.`, log.length ? [log[0].version] : []);
+}
+function showJustUpdated(ju) {
+  const vt = v => (v.match(/\d+/g) || [0]).map(Number);
+  const newer = (a, b) => { const x = vt(a), y = vt(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+  const list = (S.changelog || []).filter(e => newer(e.version, ju.from) && !newer(e.version, ju.to));
+  if (!showWhatsNew(list, `ModHub updated to ${ju.to}`, `Here's what's new since ${ju.from}.`, list.map(e => e.version))) toast(`Updated to ModHub ${ju.to}`);
+}
+$("#updNotes").onclick = showHistory;
+$("#updPeek").onclick = () => {
+  const u = S.update; if (!u) return;
+  showWhatsNew(u.changes, `What's coming in ModHub ${u.version}`, `You're on ${S.version}. Updating keeps your library and settings.`, (u.changes || []).map(e => e.version),
+    {label: `Update to ${u.version}`, run: () => applyUpdate(u.path, u.version)});
+};
+
 /* ---------- library backups ---------- */
 $("#bkSave").onclick = async () => {
   const b = $("#bkSave"); b.disabled = true;
@@ -6281,6 +6406,7 @@ function palItems(q) {
   add("Actions", "Add files from CurseForge", () => openFiles(), {ico: ICON.file});
   add("Actions", "New loadout", () => openLoadout(), {ico: ICON.plus});
   add("Actions", "Save a library backup", () => { go("settings"); after(() => $("#bkSave").click()); }, {ico: ICON.save});
+  add("Actions", "What's new in ModHub", () => showHistory(), {ico: ICON.file, s: `Version ${S.version}`});
   add("Actions", "Check for ModHub updates", () => { go("settings"); after(() => $("#updCheck").click()); }, {ico: ICON.search});
   (S.loadouts || []).filter(l => l.id !== S.active_loadout).forEach(l =>
     add("Loadouts", `Switch to ${l.name}`, () => switchLoadout(l.id), {ico: ICON.swap, s: `${l.count || 0} items`}));
@@ -6375,7 +6501,7 @@ function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); rende
 
 (async function init() {
   S = await api("/api/state");
-  if (S.just_updated) { setTimeout(() => toast(`Updated to ModHub ${S.just_updated.to}`), 900); api("/api/update/dismiss_note").catch(() => {}); }
+  if (S.just_updated) { const ju = S.just_updated; setTimeout(() => showJustUpdated(ju), 1000); api("/api/update/dismiss_note").catch(() => {}); }
   const last = S.last || {};
   setLoader(last.loader || S.loader || "fabric");
   launcher = last.launcher || (S.launchers.find(l => l.found && l.id !== "lunar") || {}).id || null;
