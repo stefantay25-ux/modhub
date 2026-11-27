@@ -53,9 +53,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "2.6", "notes": [
+        "New: a What's new button in the bottom-right corner. It shows what the last few updates brought, or all of them.",
+        "A red dot on it means there's an update you haven't read about yet.",
+    ]},
     {"version": "2.5", "notes": [
         "New: What's new. After ModHub updates, it shows you what changed. Before you update, you can see what's coming.",
         "The full history of ModHub updates is in Settings, under Updates.",
@@ -4515,6 +4519,16 @@ select option{background:var(--stone-2)}
 .cell.flash .slot{animation:flash 1.4s ease}
 @keyframes flash{0%,60%{box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),0 0 0 3px var(--accent-2),0 0 26px rgba(236,58,80,.6)}}
 /* ModHub changelog */
+.wn-fab{position:fixed;right:22px;bottom:22px;z-index:25;display:flex;align-items:center;gap:8px;height:40px;padding:0 15px 0 12px;border-radius:20px;cursor:pointer;
+  border:1px solid rgba(255,255,255,.08);background:rgba(28,28,33,.82);backdrop-filter:blur(12px) saturate(140%);-webkit-backdrop-filter:blur(12px) saturate(140%);
+  color:var(--muted);font-weight:650;font-size:13.5px;box-shadow:0 14px 34px -14px rgba(0,0,0,.9);transition:color .2s,border-color .2s,transform .2s,box-shadow .25s}
+.wn-fab svg{width:17px;height:17px;color:var(--accent-2);transition:transform .4s cubic-bezier(.3,1.6,.5,1)}
+.wn-fab:hover{color:var(--text);border-color:rgba(236,58,80,.45);transform:translateY(-2px);box-shadow:0 18px 40px -14px rgba(0,0,0,.9),0 0 22px -6px rgba(236,58,80,.5)}
+.wn-fab:hover svg{transform:rotate(18deg) scale(1.12)}
+.wn-dot{position:absolute;top:-2px;right:-2px;width:11px;height:11px;border-radius:50%;background:var(--accent-2);border:2px solid var(--stone);animation:ping 1.8s ease-out infinite}
+.wn-pick{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 2px}
+.wn-pick button{height:30px;padding:0 12px;border-radius:15px;border:1px solid var(--edge);background:none;color:var(--muted);font-weight:600;font-size:13px;cursor:pointer}
+.wn-pick button.on{background:var(--accent-tint);border-color:var(--accent);color:var(--text)}
 .wn{max-height:min(460px,58vh);overflow:auto;margin:14px -6px 0;padding:0 6px}
 .wn-v{position:relative;padding:0 0 18px 26px}
 .wn-v::before{content:"";position:absolute;left:6px;top:10px;bottom:-4px;width:2px;background:var(--stone-3)}
@@ -4823,6 +4837,7 @@ select option{background:var(--stone-2)}
   <div class="modal" id="chgBody" style="width:min(680px,100%)"></div>
 </div>
 
+<button class="wn-fab" id="wnFab" title="What's new in ModHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span>What's new</span><i class="wn-dot hidden" id="wnDot"></i></button>
 <!-- ModHub's own changelog -->
 <div class="scrim hidden" id="wnModal" role="dialog" aria-modal="true" aria-labelledby="wnTitle">
   <div class="modal" id="wnBody" style="width:min(600px,100%)"></div>
@@ -6137,17 +6152,32 @@ function showWhatsNew(entries, title, lede, fresh = [], action = null) {
   if (action) $("#wnGo").onclick = () => { closeModals(); action.run(); };
   return true;
 }
-function showHistory() {
+const RECENT = 4;
+function showHistory(all = false) {
   const log = S.changelog || [];
-  showWhatsNew(log, "What's new in ModHub", `You're on ModHub ${S.version}. Here's what each update brought.`, log.length ? [log[0].version] : []);
+  const list = all ? log : log.slice(0, RECENT);
+  showWhatsNew(list, "What's new in ModHub", `You're on ModHub ${S.version}. Here's what ${all ? "every update" : `the last ${list.length} updates`} brought.`, log.length ? [log[0].version] : []);
+  if (log.length > RECENT) {
+    $("#wnBody .wn").insertAdjacentHTML("beforebegin", `<div class="wn-pick"><button class="${all ? "" : "on"}" data-wnall="0">Recent updates</button><button class="${all ? "on" : ""}" data-wnall="1">All updates</button></div>`);
+    $$("[data-wnall]").forEach(b => b.onclick = () => showHistory(b.dataset.wnall === "1"));
+  }
+  markNotesSeen();
 }
+const SEEN_KEY = "modhub.notesSeen";
+function markNotesSeen() { try { localStorage.setItem(SEEN_KEY, S.version); } catch (e) {} $("#wnDot").classList.add("hidden"); }
+function renderNotesDot() {
+  let seen = null; try { seen = localStorage.getItem(SEEN_KEY); } catch (e) { return; }
+  $("#wnDot").classList.toggle("hidden", seen === S.version || !(S.changelog || []).length);
+}
+$("#wnFab").onclick = () => showHistory();
 function showJustUpdated(ju) {
   const vt = v => (v.match(/\d+/g) || [0]).map(Number);
   const newer = (a, b) => { const x = vt(a), y = vt(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
   const list = (S.changelog || []).filter(e => newer(e.version, ju.from) && !newer(e.version, ju.to));
+  markNotesSeen();
   if (!showWhatsNew(list, `ModHub updated to ${ju.to}`, `Here's what's new since ${ju.from}.`, list.map(e => e.version))) toast(`Updated to ModHub ${ju.to}`);
 }
-$("#updNotes").onclick = showHistory;
+$("#updNotes").onclick = () => showHistory();
 $("#updPeek").onclick = () => {
   const u = S.update; if (!u) return;
   showWhatsNew(u.changes, `What's coming in ModHub ${u.version}`, `You're on ${S.version}. Updating keeps your library and settings.`, (u.changes || []).map(e => e.version),
@@ -6513,6 +6543,7 @@ function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); rende
   if (S.favorites.length && last.version) go("install");
   settle(); setTimeout(settle, 300);
   hideSplash();
+  renderNotesDot();
 })();
 </script>
 </body>
