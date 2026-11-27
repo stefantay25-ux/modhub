@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.5.2"
+APP_VERSION = "3.5.3"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -5514,7 +5514,7 @@ details.card:not([open]){gap:0}
           </div>
           <div id="bkOut"></div>
         </section>
-        <section class="card">
+        <section class="card" id="appCard">
           <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/></svg></span><div><h3>App</h3><p id="windowMode"></p></div></div>
           <div id="windowActions"></div>
           <p class="help" style="margin:0" id="shortcutHelp"></p>
@@ -6308,7 +6308,9 @@ function watchAppSwitch() {
   }, 2000);
 }
 function renderWindowBits() {
+  // Only shown when something needs you: a window that didn't open, or the switch to the app.
   const sw = S.app_switch;
+  $("#appCard").classList.toggle("hidden", !!S.native);
   if (sw && sw.available && !S.native) {
     $("#nativeBanner").classList.add("hidden");
     const failed = sw.status === "error" || sw.gave_up;
@@ -7069,16 +7071,16 @@ function renderAppBits() {
   renderWindowBits();
   $("#quitHelp").textContent = S.in_window ? "Closing the ModHub window also stops it." : "ModHub keeps running in the background until you stop it.";
 }
-document.addEventListener("click", async e => {
-  const b = e.target.closest("[data-shortcut]"); if (!b) return;
-  b.disabled = true;
+async function addShortcut(b) {
+  if (b) b.disabled = true;
   try {
     const r = await api("/api/shortcut");
     S.shortcut_done = true; renderAppBits();
     toast("Added ModHub to " + r.made.join(" and "));
   } catch (err) { toast(err.message); }
-  b.disabled = false;
-});
+  if (b) b.disabled = false;
+}
+document.addEventListener("click", e => { const b = e.target.closest("[data-shortcut]"); if (b) addShortcut(b); });
 $("#shortcutLater").onclick = async () => { S.shortcut_done = true; renderAppBits(); api("/api/dismiss_shortcut").catch(() => {}); };
 
 /* ---------- settings ---------- */
@@ -7234,6 +7236,7 @@ function palItems(q) {
   add("Actions", dark ? "Switch to light mode" : "Switch to dark mode", () => setTheme({mode: dark ? "light" : "dark"}), {ico: ICON.swap});
   if (q) ACCENTS.filter(a => a[0] !== (S.theme || {}).accent).forEach(([id, n, c]) =>
     add("Colours", `${n} colour theme`, () => setTheme({accent: id}), {ico: `<i style="width:14px;height:14px;border-radius:4px;background:${c}"></i>`}));
+  add("Actions", "Add ModHub to the desktop and Start menu", () => addShortcut(), {ico: ICON.plus});
   add("Actions", "How to use ModHub", () => openModal("#helpModal"), {ico: ICON.file});
   add("Actions", "What's new in ModHub", () => showHistory(), {ico: ICON.file, s: `Version ${S.version}`});
   add("Actions", "Check for ModHub updates", () => { go("settings"); after(() => $("#updCheck").click()); }, {ico: ICON.search});
