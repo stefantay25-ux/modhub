@@ -54,6 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_VERSION = "3.1"
+FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
     {"version": "3.1", "notes": [
@@ -3105,7 +3106,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "theme": theme_of(cfg),
+            "theme": theme_of(cfg), "frozen": FROZEN,
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -3490,7 +3491,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, icon_png(192), "image/png")
         if u.path == "/":
             if urllib.parse.parse_qs(u.query).get("t", [""])[0] != TOKEN:
-                return self._send(403, b"Open ModHub from its shortcut, or run modhub.py again.", "text/plain")
+                return self._send(403, b"Open ModHub from its shortcut, or start it again.", "text/plain")
             return self._send(200, page_html().encode(), "text/html; charset=utf-8")
         self._send(404, {"error": "not found"})
 
@@ -3594,6 +3595,8 @@ APP_USER_MODEL_ID = "ModHub.MinecraftMods"
 
 
 def relaunch_command():
+    if FROZEN:
+        return f'"{sys.executable}"'
     script = Path(__file__).resolve()
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
@@ -3837,8 +3840,11 @@ def create_shortcuts():
     if system == "Windows":
         exe = Path(sys.executable)
         pyw = exe.with_name("pythonw.exe")
-        env = {**os.environ, "MH_TARGET": str(pyw if pyw.exists() else exe), "MH_ARGS": f'"{script}"',
-               "MH_DIR": str(script.parent), "MH_ICON": str(icons / "modhub.ico")}
+        if FROZEN:  # ModHub.exe: the shortcut opens the .exe itself
+            env = {**os.environ, "MH_TARGET": str(exe), "MH_ARGS": "", "MH_DIR": str(exe.parent), "MH_ICON": str(exe)}
+        else:
+            env = {**os.environ, "MH_TARGET": str(pyw if pyw.exists() else exe), "MH_ARGS": f'"{script}"',
+                   "MH_DIR": str(script.parent), "MH_ICON": str(icons / "modhub.ico")}
         ps = ("$ws = New-Object -ComObject WScript.Shell; "
               "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
               "$s = $ws.CreateShortcut((Join-Path $d 'ModHub.lnk')); $s.TargetPath = $env:MH_TARGET; "
@@ -3909,6 +3915,8 @@ def console_python():
 
 
 def install_webview_job(job):
+    if FROZEN:
+        raise UserError("ModHub.exe already includes its own window. Download ModHub.exe again if it doesn't open.")
     py = console_python()
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     cmd = [py, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "pywebview"]
@@ -3954,7 +3962,9 @@ def install_webview_job(job):
 
 
 def runner_python():
-    """pythonw on Windows (no console window), otherwise the current interpreter."""
+    """pythonw on Windows (no console window), otherwise the current interpreter. In ModHub.exe, the .exe itself."""
+    if FROZEN:
+        return sys.executable
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
     return str(pyw if platform.system() == "Windows" and pyw.exists() else exe)
@@ -6697,7 +6707,7 @@ function shortcutWhere() {
 }
 function renderAppBits() {
   $("#shortcutText").textContent = `Add ModHub to ${shortcutWhere()}, so it opens in its own window without running the script.`;
-  $("#shortcutHelp").textContent = `Adds ModHub to ${shortcutWhere()}. If you move modhub.py, add the shortcut again.`;
+  $("#shortcutHelp").textContent = `Adds ModHub to ${shortcutWhere()}. If you move ${S.frozen ? "ModHub.exe" : "modhub.py"}, add the shortcut again.`;
   $("#shortcutBanner").classList.toggle("hidden", !!S.shortcut_done || !S.favorites.length);
   renderWindowBits();
   $("#quitHelp").textContent = S.in_window ? "Closing the ModHub window also stops it." : "ModHub keeps running in the background until you stop it.";

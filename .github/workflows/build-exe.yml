@@ -1,0 +1,80 @@
+name: Build ModHub.exe
+
+# Every time a new modhub.py is pushed, GitHub builds ModHub.exe on a Windows computer
+# and puts it on the Releases page. The website's Download button always gets the newest one.
+on:
+  push:
+    branches: [main]
+    paths: ["modhub.py", "exe/**", ".github/workflows/build-exe.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-exe
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the builder
+        run: python -m pip install --upgrade pip pyinstaller pywebview
+
+      - name: Read the version
+        id: ver
+        shell: bash
+        run: |
+          v=$(python -c "import re;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', open('modhub.py', encoding='utf-8').read(), re.M).group(1))")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building ModHub $v"
+
+      - name: Make the icon and release notes
+        run: python exe/prepare.py
+
+      - name: Build ModHub.exe
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name ModHub --icon build/modhub.ico
+          --add-data "modhub.py;." --paths .
+          --collect-all webview --hidden-import clr
+          exe/launcher.py
+
+      - name: Check that it starts
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\ModHub.exe -ArgumentList "--no-browser","--port","47999" -PassThru
+          $code = 0
+          foreach ($i in 1..30) {
+            Start-Sleep 2
+            try { Invoke-WebRequest http://127.0.0.1:47999/ -UseBasicParsing | Out-Null; $code = 200 }
+            catch { if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode } }
+            if ($code -ne 0) { break }
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process ModHub -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($code -ne 403) {
+            Write-Host "ModHub.exe didn't start (got $code). Its log:"
+            Get-Content "$env:USERPROFILE\.modhub\modhub.log" -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "ModHub.exe started and answered, as it should."
+
+      - name: Publish it on the Releases page
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.ver.outputs.version }}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/ModHub.exe --clobber
+          else
+            gh release create "$tag" dist/ModHub.exe --title "ModHub ${{ steps.ver.outputs.version }}" --notes-file build/notes.md --latest
+          fi
