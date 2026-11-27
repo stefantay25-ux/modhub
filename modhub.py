@@ -52,10 +52,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
+LOADER_NAMES_PY = {"fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}
 DATA_DIR = Path.home() / ".modhub"
 CONFIG_PATH = DATA_DIR / "config.json"
 EXPORT_DIR = DATA_DIR / "exports"
@@ -245,6 +246,7 @@ def load_config():
     cfg.setdefault("installs", [])
     cfg.setdefault("watch", {})
     cfg.setdefault("caught_up", [])
+    cfg.setdefault("crashes", [])
     if had_cf:
         try:
             save_config(cfg)  # wipe the old CurseForge key from disk
@@ -1028,6 +1030,300 @@ def check_and_fix(job, folder: Path, gv, loader, managed=True):
 
 
 # =========================================================================== #
+# Crash helper: read crash reports and explain them
+# =========================================================================== #
+CRASH_MARKERS = ("---- Minecraft Crash Report ----", "Incompatible mods found", "Incompatible mod set",
+                 "Mod resolution encountered", "Mod resolution failed", "#@!@# Game crashed!",
+                 "Exception in thread \"main\"", "java.lang.OutOfMemoryError", "UnsupportedClassVersionError",
+                 "Minecraft has crashed", "Failed to start the minecraft server", "Mixin apply failed",
+                 "MixinApplyError", "Mixin transformation of")
+CRASH_SCAN_SECONDS = 60
+NOT_MODS = {"minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader", "forge", "neoforge", "mixinextras",
+            "fabric-api", "none", "unknown"}
+
+
+def _mods_index(mods_dir: Path):
+    idx = {}
+    for j in sorted(mods_dir.glob("*.jar")) if mods_dir.is_dir() else []:
+        m = jar_meta(j)
+        if m["main"]:
+            idx[m["main"].lower()] = {"id": m["main"], "name": m["name"], "file": j.name}
+            idx.setdefault(m["name"].lower(), idx[m["main"].lower()])
+    return idx
+
+
+def diagnose_crash(text, mods_dir: Path):
+    """Turn a crash report or log into a plain-English explanation."""
+    idx = _mods_index(mods_dir)
+    found_ids = []
+
+    def culprit(x):
+        x = (x or "").strip().strip("'\"").lower()
+        if x and x not in NOT_MODS and x in idx and idx[x] not in found_ids:
+            found_ids.append(idx[x])
+
+    d = {"kind": "unknown", "title": "The game crashed", "explain": "", "fix_check": False}
+    low = text.lower()
+    if any(k in text for k in ("Incompatible mods found", "Incompatible mod set", "Mod resolution encountered",
+                               "Mod resolution failed")) or re.search(r"which is missing|requires .* but only the wrong version", low):
+        d.update(kind="clash", title="Some mods don't work together", fix_check=True,
+                 explain="The game stopped before it started, because some mods need other mods, or different versions of them. Fix it lets ModHub sort this out for you.")
+        for m in re.finditer(r"Mod '([^']+)' \(([^)]+)\)", text):
+            culprit(m.group(2)); culprit(m.group(1))
+        for m in re.finditer(r"(?:Remove|Replace) mod '([^']+)' \(([^)]+)\)", text):
+            culprit(m.group(2))
+    elif "outofmemoryerror" in low or "out of memory" in low:
+        d.update(kind="memory", title="Minecraft ran out of memory",
+                 explain="The game needed more memory (RAM) than it was given. In Prism Launcher: right-click the instance, Edit, Settings, Java, and raise Maximum memory to 4096 MB or more. "
+                         "In the Minecraft Launcher: Installations, edit the profile, More options, and change -Xmx2G in JVM arguments to -Xmx4G or more.")
+    elif "unsupportedclassversionerror" in low or "compiled by a more recent version of the java runtime" in low:
+        d.update(kind="java", title="Minecraft needs a newer Java",
+                 explain="A mod (or Minecraft itself) needs a newer version of Java than the one the launcher used. In your launcher's settings, let it pick Java automatically, or choose the newest Java it offers.")
+    elif any(k in low for k in ("pixel format not accelerated", "glfw error 65542", "driver does not appear to support opengl",
+                                "couldn't set pixel format")):
+        d.update(kind="graphics", title="Your graphics driver needs an update",
+                 explain="Minecraft couldn't talk to your graphics card. Update your graphics driver from NVIDIA, AMD or Intel's website (or Windows Update), then restart your computer.")
+    # mods named in the report (works for most crashes)
+    for m in re.finditer(r"Suspected Mods?:\s*(.+)", text):
+        for part in re.split(r",\s*", m.group(1)):
+            mm = re.match(r"\s*(.+?)\s*\(([^)]+)\)", part)
+            if mm:
+                culprit(mm.group(2)); culprit(mm.group(1))
+    for m in re.finditer(r"(?:from mod|mod) ([a-z0-9_\-]+)[:\]\s]", text):
+        if "mixin" in text[max(0, m.start() - 200):m.start()].lower():
+            culprit(m.group(1))
+    for m in re.finditer(r"Mixin (?:apply|transformation|prepare)[^\n]*?(?:for mod|from mod) ([a-z0-9_\-]+)", text):
+        culprit(m.group(1))
+    if d["kind"] == "unknown":
+        desc = re.search(r"^Description:\s*(.+)$", text, re.M)
+        exc = re.search(r"^((?:java|net|com|org)\.[\w.$]+(?:Exception|Error)[^\n]*)", text, re.M)
+        if found_ids:
+            names = " and ".join(c["name"] for c in found_ids[:2])
+            d.update(kind="mod", title=f"{names} crashed the game",
+                     explain=f"The crash report points at {names}. Usually this means it doesn't fully support this Minecraft version yet, or it clashes with another mod. Turning it off should get you playing again.")
+        else:
+            d.update(explain="ModHub couldn't tell exactly why. " + (f"The report says: {desc.group(1).strip()}. " if desc else "")
+                     + "Copy the report and paste it to Claude to get help.")
+        if exc:
+            d["error"] = exc.group(1)[:200]
+    d["culprits"] = found_ids[:4]
+    d["fix_check"] = d["fix_check"] or d["kind"] in ("clash",)
+    return d
+
+
+def _newest_crash_file(game_dir: Path, after: float):
+    """The newest crash report, or the game log if the last run ended in an error."""
+    cands = []
+    cr = game_dir / "crash-reports"
+    if cr.is_dir():
+        cands += [f for f in cr.glob("crash-*.txt")]
+    log = game_dir / "logs" / "latest.log"
+    if log.exists():
+        cands.append(log)
+    for f in sorted(cands, key=lambda f: f.stat().st_mtime, reverse=True):
+        if f.stat().st_mtime <= after:
+            return None
+        try:
+            text = f.read_text("utf-8", "replace")
+        except OSError:
+            continue
+        if f.name == "latest.log":
+            tail = text[-60000:]
+            if not any(m in tail for m in CRASH_MARKERS):
+                continue
+            text = tail
+        return f, text[:200000]
+    return None
+
+
+def _iso_to_ts(iso):
+    try:
+        return datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return 0
+
+
+def scan_crashes():
+    with CFG_LOCK:
+        recs = [dict(r) for r in CFG.get("installs", []) if not r.get("export") and r.get("path")]
+    new = []
+    for r in recs:
+        mods_dir = Path(r["path"])
+        game_dir = mods_dir.parent
+        seen = max(r.get("crash_seen", 0), _iso_to_ts(r.get("updated") or r.get("installed") or ""))
+        got = _newest_crash_file(game_dir, seen)
+        if not got:
+            continue
+        f, text = got
+        d = diagnose_crash(text, mods_dir)
+        crash = {"install_id": r["id"], "instance": r["name"], "version": r["version"], "loader": r["loader"],
+                 "file": str(f), "at": datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                 **d}
+        OPENABLE.add(str(f))
+        new.append(crash)
+        with CFG_LOCK:
+            for x in CFG.get("installs", []):
+                if x["id"] == r["id"]:
+                    x["crash_seen"] = f.stat().st_mtime
+            CFG["crashes"] = [c for c in CFG.get("crashes", []) if c["install_id"] != r["id"]] + [crash]
+            save_config(CFG)
+    return new
+
+
+def crash_watch():
+    time.sleep(20)
+    while True:
+        try:
+            scan_crashes()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(CRASH_SCAN_SECONDS)
+
+
+def crash_excerpt(path):
+    """The part of a crash report worth sending to someone for help."""
+    try:
+        text = Path(path).read_text("utf-8", "replace")
+    except OSError:
+        raise UserError("The crash report is gone.")
+    if Path(path).name == "latest.log":
+        lines = text.splitlines()
+        hit = next((i for i in range(len(lines) - 1, -1, -1) if any(m in lines[i] for m in CRASH_MARKERS)), max(0, len(lines) - 80))
+        text = "\n".join(lines[max(0, hit - 30):hit + 90])
+    else:
+        text = text[:12000]
+    return text
+
+
+# =========================================================================== #
+# Performance boost: a trusted set of performance mods
+# =========================================================================== #
+PERF_MODS = [
+    ("sodium", "Much faster graphics. Often doubles your FPS."),
+    ("embeddium", "Faster graphics for Forge, based on Sodium."),
+    ("lithium", "Faster game logic, so less lag from mobs, redstone and farms."),
+    ("ferrite-core", "Uses noticeably less memory (RAM)."),
+    ("entityculling", "Skips drawing mobs and block entities you can't see."),
+    ("immediatelyfast", "Draws text, maps and the HUD faster."),
+    ("modernfix", "Faster loading and lower memory use."),
+    ("dynamic-fps", "Lowers FPS when the game is in the background, to save power."),
+]
+_PERF_CACHE = {}
+
+
+def perf_list(loader, gv=None):
+    loader = loader if loader in LOADERS else "fabric"
+    ok_loaders = {"quilt": {"quilt", "fabric"}}.get(loader, {loader})
+    with CFG_LOCK:
+        have = {str(f["id"]) for f in CFG["favorites"] if f.get("source") == "modrinth"}
+    out = []
+    for slug, why in PERF_MODS:
+        if slug not in _PERF_CACHE:
+            try:
+                _PERF_CACHE[slug] = http_json("GET", f"{MODRINTH}/project/{slug}")
+            except Exception:
+                _PERF_CACHE[slug] = None
+        pr = _PERF_CACHE[slug]
+        if not pr:
+            continue
+        loaders = set(pr.get("loaders") or [])
+        if slug == "embeddium" and loader != "forge":
+            continue  # Sodium covers the other loaders
+        reason = None
+        if not loaders & ok_loaders:
+            reason = f"not made for {LOADER_NAMES_PY[loader]}"
+        elif gv and gv not in (pr.get("game_versions") or []):
+            reason = f"not out for {gv} yet"
+        fav = mr_fav(pr)
+        out.append({**fav, "why": why, "available": reason is None, "reason": reason,
+                    "in_library": pr["id"] in have})
+    return out
+
+
+def perf_add(ids):
+    added = []
+    with CFG_LOCK:
+        have = {str(f["id"]) for f in CFG["favorites"] if f.get("source") == "modrinth"}
+        for pr in _PERF_CACHE.values():
+            if pr and pr["id"] in ids and pr["id"] not in have:
+                fav = mr_fav(pr)
+                CFG["favorites"].append({k: fav.get(k) for k in ("source", "id", "slug", "name", "icon", "desc", "url", "kind")})
+                added.append(fav["name"])
+        save_config(CFG)
+    return added
+
+
+# =========================================================================== #
+# Bring my settings along: video settings, keybinds, servers and mod configs
+# =========================================================================== #
+SETTINGS_FILES = {"options.txt": "video settings and keybinds", "optionsof.txt": "OptiFine settings",
+                  "optionsshaders.txt": "shader settings", "servers.dat": "server list"}
+SETTINGS_DIRS = ("config",)
+
+
+def settings_sources(cfg):
+    """Instances you've played that have settings worth copying, most recently played first."""
+    seen, out = set(), []
+
+    def add(game_dir, name, launcher):
+        g = Path(game_dir)
+        try:
+            key = str(g.resolve()).lower()
+        except OSError:
+            return
+        if key in seen or not (g / "options.txt").exists():
+            return
+        seen.add(key)
+        out.append({"path": str(g), "name": name, "launcher": launcher,
+                    "played": (g / "options.txt").stat().st_mtime})
+    for f in find_mod_folders(cfg):
+        add(Path(f["path"]).parent, f["name"], f["launcher"])
+    for r in cfg.get("installs", []):
+        if r.get("path"):
+            add(Path(r["path"]).parent, r["name"], r.get("launcher_name", ""))
+    add(launcher_path(cfg, "official"), "Default (.minecraft)", "Minecraft Launcher")
+    out.sort(key=lambda x: x["played"], reverse=True)
+    return out[:20]
+
+
+def copy_settings(src: Path, dst: Path, log=print):
+    """Copy settings into a new instance. Never overwrites settings that are already there."""
+    if not src.is_dir():
+        raise UserError("The instance to copy settings from isn't there any more.")
+    try:
+        if src.resolve() == dst.resolve():
+            return []
+    except OSError:
+        pass
+    dst.mkdir(parents=True, exist_ok=True)
+    brought = []
+    for name, label in SETTINGS_FILES.items():
+        f = src / name
+        if f.is_file() and not (dst / name).exists():
+            shutil.copy2(f, dst / name)
+            brought.append(label)
+    for d in SETTINGS_DIRS:
+        sd = src / d
+        if not sd.is_dir():
+            continue
+        n = 0
+        for f in sd.rglob("*"):
+            if not f.is_file() or f.stat().st_size > 20_000_000:
+                continue
+            target = dst / d / f.relative_to(sd)
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, target)
+            n += 1
+        if n:
+            brought.append(f"{n} mod setting {'file' if n == 1 else 'files'}")
+    if brought:
+        log("Brought along: " + ", ".join(brought))
+    return brought
+
+
+# =========================================================================== #
 # Launchers
 # =========================================================================== #
 def official_prepare(ctx):
@@ -1246,6 +1542,7 @@ def install_job(job, req, remember=True):
                 CFG["seen_newest"] = gv
             CFG["loader"] = loader
             CFG["last"] = {"version": gv, "loader": loader, "launcher": launcher,
+                           "settings_from": req.get("settings_from") or "",
                            "folders": {**(CFG.get("last", {}).get("folders") or {}),
                                        **({launcher: req.get("folder")} if req.get("folder") else {})}}
             save_config(CFG)
@@ -1267,6 +1564,13 @@ def install_job(job, req, remember=True):
         raise UserError(f"Nothing in \"{lname}\" has a {gv} {loader} version yet. Nothing was installed.")
     job.progress = 0.48
     mods_dir = L["prepare"](ctx)
+    brought = []
+    src = (req.get("settings_from") or "").strip()
+    if src and launcher != "lunar":
+        try:
+            brought = copy_settings(Path(src), mods_dir.parent, job.log)
+        except UserError as e:
+            job.log(f"Couldn't bring settings along: {e}")
     job.log(f"Downloading {len(ready)} items...")
     install_mods(job, mods_dir, items, managed=not L["finish"])
     job.progress = 0.93
@@ -1280,7 +1584,8 @@ def install_job(job, req, remember=True):
     job.log(f"Done! {added} installed.")
     install_id = record_install(req, ctx, lid, lname, mods_dir, export=bool(L["finish"]), items=items)
     return {"items": items, "message": ctx.get("message", ""), "open": str(ctx.get("open") or ""),
-            "changes": job.changes, "install_id": install_id, "problems": problems, "export": bool(L["finish"])}
+            "changes": job.changes, "install_id": install_id, "problems": problems, "export": bool(L["finish"]),
+            "brought": brought}
 
 
 # =========================================================================== #
@@ -2421,7 +2726,7 @@ def state():
             "has_backup": any((DATA_DIR / "backups").glob("modhub-*.py")) if (DATA_DIR / "backups").is_dir() else False,
             "loadouts": loadouts_view(CFG), "active_loadout": cfg.get("active_loadout"),
             "installs": cfg.get("installs", []), "caught_up": cfg.get("caught_up", []),
-            "watching": len(cfg.get("watch") or {}),
+            "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": cfg.get("update_source", ""), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
@@ -2525,6 +2830,29 @@ def api(path, body):
         return state()
     if path == "/api/watch/check":
         return {"found": check_watched(), **{k: v for k, v in state().items() if k in ("caught_up", "watching")}}
+    if path == "/api/perf":
+        return {"mods": perf_list(body.get("loader"), (body.get("version") or "").strip() or None)}
+    if path == "/api/perf/add":
+        added = perf_add(set(body.get("ids") or []))
+        return {"added": added, "favorites": CFG["favorites"]}
+    if path == "/api/settings_sources":
+        with CFG_LOCK:
+            cfg = json.loads(json.dumps({k: v for k, v in CFG.items() if k != "favorites"}))
+        return {"sources": settings_sources(cfg)}
+    if path == "/api/crashes/scan":
+        scan_crashes()
+        return {"crashes": CFG.get("crashes", [])}
+    if path == "/api/crashes/dismiss":
+        with CFG_LOCK:
+            CFG["crashes"] = [c for c in CFG.get("crashes", []) if c["install_id"] != body.get("id")]
+            save_config(CFG)
+        return {"crashes": CFG.get("crashes", [])}
+    if path == "/api/crashes/excerpt":
+        c = next((c for c in CFG.get("crashes", []) if c["install_id"] == body.get("id")), None)
+        if not c:
+            raise UserError("That crash isn't here any more.")
+        return {"text": f"My modded Minecraft ({c['version']}, {LOADER_NAMES_PY.get(c['loader'], c['loader'])}) crashed. "
+                        f"Can you tell me why and how to fix it? Here's the crash report:\n\n" + crash_excerpt(c["file"])}
     if path == "/api/caught_up/apply":
         return {"job": start_job(apply_caught_up_job, body.get("key"), body.get("version"))}
     if path == "/api/caught_up/dismiss":
@@ -3391,6 +3719,7 @@ def main():
     threading.Thread(target=version_watch, daemon=True).start()
     threading.Thread(target=update_watch, daemon=True).start()
     threading.Thread(target=watch_loop, daemon=True).start()
+    threading.Thread(target=crash_watch, daemon=True).start()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PREFERRED_PORT
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -3644,6 +3973,26 @@ details.more > summary:hover{color:var(--text)}
 .prob p{margin:3px 0 0;color:var(--muted);font-size:13.5px}
 .prob .actions{margin-top:10px}
 .prob.fixed b{color:var(--muted);font-weight:600;text-decoration:line-through;text-decoration-color:rgba(255,255,255,.25)}
+.crashn{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(255,90,95,.13),var(--stone-2) 60%);border:1px solid #4a1c22}
+.crashn .boom{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:rgba(255,90,95,.15);color:var(--missing);flex:none;font:800 20px var(--display)}
+.crashn .grow{flex:1;min-width:0}
+.crashn b{display:block}
+.crashn p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
+.errline{font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--faint);background:var(--deep);border-radius:8px;padding:8px 10px;margin-top:12px;overflow-wrap:anywhere}
+.boost{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 18px;border-radius:14px;background:linear-gradient(90deg,rgba(242,184,75,.10),var(--stone-2) 55%);border:1px solid #3b331f}
+.boost .bolt{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;background:rgba(242,184,75,.14);color:#f2b84b;flex:none}
+.boost .grow{flex:1;min-width:0}
+.boost b{display:block}
+.boost p{margin:2px 0 0;color:var(--muted);font-size:13.5px}
+.pmod{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;background:var(--stone-2);border:1px solid #24242a;margin-top:8px;cursor:pointer}
+.pmod input{width:18px;height:18px;accent-color:var(--accent);flex:none}
+.pmod .grow{flex:1;min-width:0}
+.pmod b{display:block;font-weight:650}
+.pmod p{margin:1px 0 0;color:var(--muted);font-size:13px}
+.pmod.na{opacity:.5;cursor:default}
+.pmod .tag{flex:none}
+.carry{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid #24242a}
+.carry select{width:auto;min-width:260px;height:36px}
 .catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid #23402f}
 .catch .grow{flex:1;min-width:0}
 .catch b{display:block}
@@ -3881,6 +4230,7 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
       <button class="btn go" id="newVerGo"></button>
       <button class="btn quiet" id="newVerLater">Not now</button>
     </div>
+    <div id="crashBox"></div>
     <div id="catchUp"></div>
     <!-- LIBRARY -->
     <section id="tab-library">
@@ -3923,6 +4273,11 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
       <p class="help">Found it on CurseForge instead? Download it there, then <a href="#" onclick="openFiles();return false">add the file</a> or drag it into this window.</p>
       <div id="results"></div>
 
+      <div class="boost" id="boostCard">
+        <div class="bolt"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div>
+        <div class="grow"><b>Performance boost</b><p>Add a trusted set of mods that make Minecraft run faster and smoother.</p></div>
+        <button class="btn" id="boostBtn">Choose mods</button>
+      </div>
       <div class="inv-h">
         <h3 id="invTitle">Your mods</h3>
         <input class="filter" id="libFilter" placeholder="Filter your mods" aria-label="Filter your mods">
@@ -3962,6 +4317,15 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
           <div class="picker"><input id="folder" placeholder="Choose the mods folder"><button class="btn" data-browse="#folder" data-title="Choose the mods folder to install into">Browse</button></div>
           <p class="help" id="folderHelp"></p>
         </div>
+      </div>
+
+      <div class="block" id="carryBlock">
+        <span class="field-label">Your settings</span>
+        <div class="carry">
+          <label class="check" style="margin:0"><input type="checkbox" id="carryOn"> Bring my settings along from</label>
+          <select id="carryFrom" aria-label="Instance to copy settings from"></select>
+        </div>
+        <p class="help">Video settings, keybinds, your server list and mod configs. Anything the new instance already has stays as it is.</p>
       </div>
 
       <div class="block">
@@ -4083,6 +4447,16 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
   <div class="modal" id="loBody"></div>
 </div>
 
+<!-- crash modal -->
+<div class="scrim hidden" id="crashModal" role="dialog" aria-modal="true" aria-labelledby="crashTitle">
+  <div class="modal" id="crashBody"></div>
+</div>
+
+<!-- performance boost modal -->
+<div class="scrim hidden" id="boostModal" role="dialog" aria-modal="true" aria-labelledby="boostTitle">
+  <div class="modal" id="boostBody"></div>
+</div>
+
 <!-- problems popup -->
 <div class="scrim hidden" id="probModal" role="dialog" aria-modal="true" aria-labelledby="probTitle">
   <div class="modal" id="probBody"></div>
@@ -4164,7 +4538,7 @@ function go(tab) {
   if (typeof settle === "function") settle();
   clearInterval(portsPoll);
   if (tab === "ports") { loadPorts(); portsPoll = setInterval(loadPorts, 4000); }
-  if (tab === "install" && S) updateSteps();
+  if (tab === "install" && S) { updateSteps(); loadCarry(); }
   if (tab === "instances" && S) renderInstances();
   window.scrollTo(0, 0);
 }
@@ -4228,6 +4602,7 @@ function setKind(k) {
   $$("#kindSeg button").forEach(b => { b.classList.toggle("on", b.dataset.kind === k); b.setAttribute("aria-selected", b.dataset.kind === k); });
   $("#q").placeholder = `Search Modrinth for ${KIND[k].many}`;
   $("#shaderHelp").classList.toggle("hidden", k !== "shader");
+  $("#boostCard").classList.toggle("hidden", k !== "mod");
   $("#searchLoader").classList.toggle("hidden", k !== "mod");
   lastResults = []; $("#results").innerHTML = "";
   if ($("#q").value.trim()) search();
@@ -4547,6 +4922,7 @@ function updateSteps() {
   const what = S.favorites.length ? `Install ${countText(S.favorites).replace("resource pack", "pack")}` : "Install mods";
   $("#installBtn").textContent = l ? `${what} to ${l.id === "folder" ? "a folder" : l.name}` : what;
   $("#folderRow").classList.toggle("hidden", !(l && l.folder));
+  if (carryLoaded) $("#carryBlock").classList.toggle("hidden", launcher === "lunar" || !$("#carryFrom").options.length);
   if (l && l.folder) {
     const saved = (S.last.folders || {})[launcher];
     if (saved && !$("#folder").value) $("#folder").value = saved;
@@ -4580,7 +4956,7 @@ function renderOutcome(res, gv, kind, l) {
   const ready = by("ready"), missing = by("not_ready"), attn = [...by("needs_file"), ...by("failed")], skipped = by("duplicate");
   let h = "";
   if (kind === "install") {
-    h += `<div class="banner"><div class="grow"><b>Installed ${countText(ready)} for Minecraft ${esc(gv)}</b><p>${esc(res.message)}</p></div>
+    h += `<div class="banner"><div class="grow"><b>Installed ${countText(ready)} for Minecraft ${esc(gv)}</b><p>${esc(res.message)}${res.brought && res.brought.length ? ` Brought along: ${esc(res.brought.join(", "))}.` : ""}</p></div>
       ${res.open ? `<button class="btn sm" id="openBtn">Show in folder</button>` : ""}</div>`;
   } else {
     h += `<div class="banner ${ready.length ? "" : "warn"}"><div class="grow"><b>${ready.length} of ${res.items.length} ready for Minecraft ${esc(gv)}</b><p>Nothing was installed. Pick a launcher and choose Install when you're happy.</p></div></div>`;
@@ -4623,7 +4999,8 @@ async function runJob(kind) {
   if (!gv) { $("#outcome").innerHTML = `<div class="banner err"><div class="grow"><b>Choose a Minecraft version first</b><p>Pick one from the list at the top.</p></div></div>`; return; }
   if (kind === "install" && !l) { $("#outcome").innerHTML = `<div class="banner err"><div class="grow"><b>Choose where your mods should go</b><p>Pick a launcher above.</p></div></div>`; return; }
   if (kind === "install" && l.folder && !$("#folder").value.trim()) { $("#outcome").innerHTML = `<div class="banner err"><div class="grow"><b>Choose the mods folder</b><p>Click Browse next to Mods folder.</p></div></div>`; return; }
-  const body = {version: gv, loader, launcher, name: $("#iname").value.trim() || $("#iname").placeholder, folder: $("#folder").value.trim()};
+  const body = {version: gv, loader, launcher, name: $("#iname").value.trim() || $("#iname").placeholder, folder: $("#folder").value.trim(),
+                settings_from: $("#carryOn").checked && !$("#carryBlock").classList.contains("hidden") && launcher !== "lunar" ? $("#carryFrom").value : ""};
   $("#checkBtn").disabled = $("#installBtn").disabled = true;
   $("#progress").classList.remove("hidden"); $("#log").textContent = ""; $("#barFill").style.width = "0"; $("#outcome").innerHTML = "";
   $("#now").textContent = kind === "install" ? "Starting" : "Checking your mods";
@@ -5064,7 +5441,7 @@ function renderInstances() {
       <div class="inst-top"><div class="inst-ico">${esc(r.version)}</div>
         <div class="body"><div class="t">${esc(r.name)}</div>
           <div class="s">Minecraft ${esc(r.version)} with ${LOADER_NAMES[r.loader] || esc(r.loader)}, ${r.export ? "built for" : "in"} ${r.launcher === "folder" ? "a folder" : esc(r.launcher_name)}</div>
-          <div class="meta"><span class="tag lo">${esc(r.loadout_name || "My mods")}</span>${what ? `<span class="tag">${esc(what)}</span>` : ""}<span class="tag">Updated ${esc(timeAgo(r.updated))}</span></div>
+          <div class="meta">${(S.crashes || []).some(c => c.install_id === r.id) ? `<span class="tag" style="color:var(--missing);background:rgba(255,90,95,.12)">Crashed</span>` : ""}<span class="tag lo">${esc(r.loadout_name || "My mods")}</span>${what ? `<span class="tag">${esc(what)}</span>` : ""}<span class="tag">Updated ${esc(timeAgo(r.updated))}</span></div>
         </div></div>
       <div class="actions">
         ${r.export ? `<button class="btn" data-iup="${esc(r.id)}">Build a fresh pack</button>` : `<button class="btn go" data-iup="${esc(r.id)}">Update</button>`}
@@ -5210,6 +5587,106 @@ async function checkInstance(id, btn) {
   btn.disabled = false; btn.textContent = label;
 }
 
+/* ---------- crash helper ---------- */
+function renderCrashes() {
+  const list = S.crashes || [];
+  $("#crashBox").innerHTML = list.map(c => `
+    <div class="crashn rise" data-crash="${esc(c.install_id)}"><div class="boom">!</div>
+      <div class="grow"><b>${esc(c.instance)} crashed ${esc(timeAgo(c.at))}</b><p>${esc(c.title)}.</p></div>
+      <button class="btn go sm" data-cshow>See what happened</button>
+      <button class="btn quiet sm" data-cdis>Dismiss</button></div>`).join("");
+  $$("#crashBox .crashn").forEach(el => {
+    const id = el.dataset.crash;
+    el.querySelector("[data-cshow]").onclick = () => openCrash(id);
+    el.querySelector("[data-cdis]").onclick = async () => { S.crashes = (await api("/api/crashes/dismiss", {id})).crashes; renderCrashes(); renderInstances(); };
+  });
+  const navI = $(".nav[data-tab=instances]");
+  if (list.length && !navI.querySelector(".dot-new")) navI.insertAdjacentHTML("beforeend", `<span class="dot-new" title="An instance crashed"></span>`);
+}
+function openCrash(id) {
+  const c = (S.crashes || []).find(x => x.install_id === id);
+  if (!c) return;
+  const culprits = c.culprits || [];
+  $("#crashBody").innerHTML = `
+    <h2 id="crashTitle">${esc(c.title)}</h2>
+    <p class="lede">${esc(c.instance)}, Minecraft ${esc(c.version)} with ${LOADER_NAMES[c.loader] || esc(c.loader)}. ${esc(c.explain)}</p>
+    ${culprits.map(m => `<div class="prob open"><div class="ic">!</div><div class="grow"><b>${esc(m.name)}</b><p>Named in the crash report.</p>
+        <div class="actions"><button class="btn sm" data-coff="${esc(m.file)}">Turn off ${esc(m.name)}</button></div></div></div>`).join("")}
+    ${c.error ? `<div class="errline">${esc(c.error)}</div>` : ""}
+    <div class="foot" style="justify-content:space-between;flex-wrap:wrap">
+      <span class="actions"><button class="btn quiet" id="crashCopy">Copy for Claude</button><button class="btn quiet" id="crashOpen">Open crash report</button></span>
+      <span class="actions">${c.fix_check ? `<button class="btn go" id="crashFix">Fix it</button>` : ""}<button class="btn ${c.fix_check ? "" : "go"}" data-close>Done</button></span>
+    </div>`;
+  openModal("#crashModal");
+  $$("#crashBody [data-coff]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api("/api/problems/turn_off", {id, file: b.dataset.coff});
+      b.closest(".prob").className = "prob off"; b.closest(".prob").querySelector(".ic").textContent = "–";
+      b.parentElement.innerHTML = `<span class="help" style="margin:0">Turned off in this instance. Start the game again.</span>`;
+      toast("Turned off");
+    } catch (e) { toast(e.message); b.disabled = false; }
+  });
+  $("#crashCopy").onclick = async () => {
+    try { const r = await api("/api/crashes/excerpt", {id}); await navigator.clipboard.writeText(r.text); toast("Copied. Paste it into a chat with Claude"); }
+    catch (e) { toast(e.message); }
+  };
+  $("#crashOpen").onclick = () => api("/api/open", {path: c.file}).catch(e => toast(e.message));
+  const fix = $("#crashFix");
+  if (fix) fix.onclick = async () => {
+    closeModals();
+    S.crashes = (await api("/api/crashes/dismiss", {id})).crashes; renderCrashes();
+    go("instances");
+    const b = $(`.inst[data-inst="${CSS.escape(id)}"] [data-icheck]`);
+    if (b) checkInstance(id, b);
+  };
+}
+async function refreshCrashes() {
+  try { const r = await api("/api/crashes/scan"); if (JSON.stringify(r.crashes) !== JSON.stringify(S.crashes)) { S.crashes = r.crashes; renderCrashes(); renderInstances(); } } catch (e) {}
+}
+setInterval(refreshCrashes, 60 * 1000);
+window.addEventListener("focus", refreshCrashes);
+
+/* ---------- performance boost ---------- */
+$("#boostBtn").onclick = async () => {
+  $("#boostBody").innerHTML = `<h2 id="boostTitle">Performance boost</h2><p class="now"><span class="spin"></span>&nbsp; Checking which ones work with ${LOADER_NAMES[loader]}</p>`;
+  openModal("#boostModal");
+  let mods;
+  try { mods = (await api("/api/perf", {loader, version: getVersion()})).mods; }
+  catch (e) { $("#boostBody").innerHTML = `<h2>Performance boost</h2><div class="banner err"><div class="grow"><b>Couldn't load the list</b><p>${esc(e.message)}</p></div></div><div class="foot"><button class="btn" data-close>Close</button></div>`; return; }
+  $("#boostBody").innerHTML = `
+    <h2 id="boostTitle">Performance boost</h2>
+    <p class="lede">Popular, trusted mods that make Minecraft faster. They're picked to work together, for ${LOADER_NAMES[loader]}${getVersion() ? " and Minecraft " + esc(getVersion()) : ""}.</p>
+    ${mods.map((m, i) => `<label class="pmod ${m.available ? "" : "na"}">
+        <input type="checkbox" data-pm="${esc(m.id)}" ${m.in_library ? "checked disabled" : m.available ? "checked" : "disabled"}>
+        ${ico(m)}<div class="grow"><b>${esc(m.name)}</b><p>${esc(m.why)}</p></div>
+        ${m.in_library ? `<span class="tag">In library</span>` : !m.available ? `<span class="tag">${esc(m.reason)}</span>` : ""}</label>`).join("")}
+    <div class="foot"><button class="btn quiet" data-close>Cancel</button><button class="btn go" id="boostAdd"></button></div>`;
+  const upd = () => { const n = $$("#boostBody [data-pm]:checked:not(:disabled)").length; $("#boostAdd").textContent = n ? `Add ${n} ${n === 1 ? "mod" : "mods"}` : "Nothing to add"; $("#boostAdd").disabled = !n; };
+  $$("#boostBody [data-pm]").forEach(c => c.onchange = upd); upd();
+  $("#boostAdd").onclick = async () => {
+    const ids = $$("#boostBody [data-pm]:checked:not(:disabled)").map(c => c.dataset.pm);
+    const r = await api("/api/perf/add", {ids});
+    S.favorites = r.favorites; closeModals(); renderInventory();
+    toast(`Added ${r.added.length} performance ${r.added.length === 1 ? "mod" : "mods"}`);
+  };
+};
+
+/* ---------- bring my settings along ---------- */
+let carryLoaded = false;
+async function loadCarry() {
+  const sel = $("#carryFrom");
+  try {
+    const {sources} = await api("/api/settings_sources");
+    const want = (S.last || {}).settings_from;
+    sel.innerHTML = sources.map(x => `<option value="${esc(x.path)}" ${x.path === want ? "selected" : ""}>${esc(x.name)} (${esc(x.launcher)})</option>`).join("");
+    $("#carryBlock").classList.toggle("hidden", !sources.length);
+    if (!carryLoaded) $("#carryOn").checked = !!sources.length && (want !== "" || !(S.installs || []).length);
+    carryLoaded = true;
+  } catch (e) { $("#carryBlock").classList.add("hidden"); }
+}
+$("#carryOn").onchange = () => { $("#carryFrom").disabled = !$("#carryOn").checked; };
+
 /* ---------- new Minecraft versions ---------- */
 let newVerPoll;
 function renderNewVersion() {
@@ -5310,7 +5787,7 @@ $("#quitBtn").onclick = async () => {
   document.body.innerHTML = `<main style="padding:60px"><h1>ModHub has stopped</h1><p class="lede">You can close this tab.</p></main>`;
 };
 
-function renderAll() { renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
+function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
 (async function init() {
   S = await api("/api/state");
