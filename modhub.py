@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.5.1"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -186,7 +186,26 @@ def http_json(method, url, body=None, headers=None, retries=4):
     raise UserError(f"Couldn't reach {urllib.parse.urlparse(url).netloc} - check your internet. ({last})")
 
 
+def zread(z, name, limit=32_000_000):
+    """Read a file inside a .jar/.zip, refusing absurd sizes (a crafted file could otherwise exhaust memory)."""
+    info = z.getinfo(name) if isinstance(name, str) else name
+    if info.file_size > limit:
+        raise ValueError(f"{info.filename} is too big to read")
+    return z.read(info)
+
+
+def safe_filename(name):
+    """A file name from the internet, safe to write into a mods folder: no folders, no tricks."""
+    base = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    if not base or base in (".", "..") or base.startswith(".") or any(ord(c) < 32 for c in base) \
+            or re.search(r'[<>:"|?*]', base) or len(base) > 200:
+        raise UserError(f"Skipped a file with an unsafe name: {str(name)[:80]!r}")
+    return base
+
+
 def download(url, dest: Path, expected_sha1=None):
+    if not str(url).startswith("https://"):
+        raise UserError("Refused to download over an insecure connection.")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     fd, tmp = tempfile.mkstemp(dir=dest.parent, suffix=".part")
     h = hashlib.sha1()
@@ -235,17 +254,17 @@ def read_mod_ids(jar):
             names = set(z.namelist())
             if "fabric.mod.json" in names:
                 try:
-                    ids.add(json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"), strict=False)["id"])
+                    ids.add(json.loads(zread(z, "fabric.mod.json").decode("utf-8", "replace"), strict=False)["id"])
                 except Exception:
                     pass
             if "quilt.mod.json" in names:
                 try:
-                    ids.add(json.loads(z.read("quilt.mod.json").decode("utf-8", "replace"))["quilt_loader"]["id"])
+                    ids.add(json.loads(zread(z, "quilt.mod.json").decode("utf-8", "replace"))["quilt_loader"]["id"])
                 except Exception:
                     pass
             for toml in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
                 if toml in names:
-                    text = z.read(toml).decode("utf-8", "replace")
+                    text = zread(z, toml).decode("utf-8", "replace")
                     ids.update(re.findall(r'^\s*modId\s*=\s*"([^"]+)"', text, re.M))
                     break
     except Exception:
@@ -333,7 +352,17 @@ def save_config(cfg):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps({k: v for k, v in cfg.items() if k != "favorites"}, indent=2), "utf-8")
+    private(tmp)
     os.replace(tmp, CONFIG_PATH)
+
+
+def private(path):
+    """Only you can read it (on Mac and Linux; Windows keeps your user folder private already)."""
+    try:
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def launcher_path(cfg, key):
@@ -507,7 +536,13 @@ def mr_latest_any(project_id):
 
 def mr_primary_file(version):
     files = version.get("files") or []
-    return next((f for f in files if f.get("primary")), files[0]) if files else None
+    f = next((f for f in files if f.get("primary")), files[0]) if files else None
+    if not f:
+        return None
+    try:  # a file name with folders or tricks in it is never written anywhere
+        return {**f, "filename": safe_filename(f.get("filename"))}
+    except UserError:
+        return None
 
 
 def mr_game_versions():
@@ -678,7 +713,7 @@ def resolve(job, favorites, gv, loader, ports=None):
             it["status"] = "not_ready"
             continue
         it.update(status="ready", version=v.get("version_number", ""), changelog=(v.get("changelog") or "")[:4000],
-                  file={"url": f["url"], "filename": f["filename"], "sha1": (f.get("hashes") or {}).get("sha1")})
+                  file={"url": f["url"], "filename": safe_filename(f["filename"]), "sha1": (f.get("hashes") or {}).get("sha1")})
         if it["kind"] == "mod":
             for d in v.get("dependencies") or []:
                 if d.get("dependency_type") != "required":
@@ -804,7 +839,7 @@ def _place(job, folder: Path, items, managed, progress):
                 it["notes"].append(f"download failed: {e}")
                 job.log(f"    ! failed: {e}")
                 continue
-        if old and old != f["filename"] and (folder / old).exists():
+        if old and old != f["filename"] and Path(old).name == old and (folder / old).exists():
             (folder / old).unlink()
             job.log(f"    removed older copy {old}")
         manifest[it["key"]] = f["filename"]
@@ -954,7 +989,7 @@ def _read_meta_from_zip(z, out, nested=True, depth=0):
     names = set(z.namelist())
     if "fabric.mod.json" in names:
         try:
-            m = json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"), strict=False)
+            m = json.loads(zread(z, "fabric.mod.json").decode("utf-8", "replace"), strict=False)
             mid, ver = m.get("id"), str(m.get("version", ""))
             if mid:
                 out["ids"].setdefault(mid, ver)
@@ -970,7 +1005,7 @@ def _read_meta_from_zip(z, out, nested=True, depth=0):
             pass
     if "quilt.mod.json" in names:
         try:
-            ql = json.loads(z.read("quilt.mod.json").decode("utf-8", "replace")).get("quilt_loader", {})
+            ql = json.loads(zread(z, "quilt.mod.json").decode("utf-8", "replace")).get("quilt_loader", {})
             mid, ver = ql.get("id"), str(ql.get("version", ""))
             if mid:
                 out["ids"].setdefault(mid, ver)
@@ -991,10 +1026,10 @@ def _read_meta_from_zip(z, out, nested=True, depth=0):
     for toml in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
         if toml not in names:
             continue
-        text = z.read(toml).decode("utf-8", "replace")
+        text = zread(z, toml).decode("utf-8", "replace")
         jar_ver = ""
         if "META-INF/MANIFEST.MF" in names:
-            mm = re.search(r"^Implementation-Version:\s*(\S+)", z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace"), re.M)
+            mm = re.search(r"^Implementation-Version:\s*(\S+)", zread(z, "META-INF/MANIFEST.MF").decode("utf-8", "replace"), re.M)
             jar_ver = mm.group(1) if mm else ""
         mods = re.split(r"^\s*\[\[mods\]\]\s*$", text, flags=re.M)[1:]
         for i, block in enumerate(mods):
@@ -1027,7 +1062,7 @@ def _read_meta_from_zip(z, out, nested=True, depth=0):
             if (n.startswith("META-INF/jars/") or n.startswith("META-INF/jarjar/")) and n.endswith(".jar"):
                 try:
                     import io
-                    with zipfile.ZipFile(io.BytesIO(z.read(n))) as inner:
+                    with zipfile.ZipFile(io.BytesIO(zread(z, n, 128_000_000))) as inner:
                         _read_meta_from_zip(inner, out, nested=True, depth=depth + 1)
                 except Exception:
                     pass
@@ -1537,7 +1572,7 @@ def save_library_backup():
         loadouts = json.loads(json.dumps(CFG["loadouts"]))
         data = {"format": 1, "app": "ModHub", "app_version": APP_VERSION, "created": now_iso(),
                 "loadouts": loadouts, "active_loadout": CFG.get("active_loadout"),
-                "settings": {k: CFG.get(k) for k in ("update_source", "update_auto", "loader") if CFG.get(k) is not None}}
+                "settings": {k: CFG.get(k) for k in ("update_auto", "loader") if CFG.get(k) is not None}}
     own = {}
     for lo in loadouts.values():
         for f in lo["favorites"]:
@@ -1576,7 +1611,7 @@ def restore_library_backup(path: Path):
         if BACKUP_MARKER not in z.namelist():
             raise UserError("That isn't a ModHub backup file.")
         try:
-            data = json.loads(z.read(BACKUP_MARKER).decode("utf-8"))
+            data = json.loads(zread(z, BACKUP_MARKER).decode("utf-8"))
         except Exception:
             raise UserError("That backup file is damaged.")
         if data.get("app") != "ModHub" or not isinstance(data.get("loadouts"), dict):
@@ -1611,9 +1646,6 @@ def restore_library_backup(path: Path):
                 items += len(new)
                 if new:
                     merged_lo.append(name)
-        st = data.get("settings") or {}
-        if st.get("update_source") and not CFG.get("update_source"):
-            CFG["update_source"] = st["update_source"]
         CFG["favorites"] = CFG["loadouts"][CFG["active_loadout"]]["favorites"]
         save_config(CFG)
     return {"loadouts_added": added_lo, "loadouts_merged": merged_lo, "items": items, "files": files,
@@ -2144,7 +2176,7 @@ def read_file_info(path: Path, display_name=None):
                 info["kind"] = "resourcepack"
                 icon_path = "pack.png" if "pack.png" in names else None
                 try:
-                    desc = json.loads(z.read("pack.mcmeta").decode("utf-8", "replace")).get("pack", {}).get("description")
+                    desc = json.loads(zread(z, "pack.mcmeta").decode("utf-8", "replace")).get("pack", {}).get("description")
                     if isinstance(desc, str) and desc.strip() and len(desc) < 80:
                         info["desc"] = re.sub(r"§.", "", desc)
                 except Exception:
@@ -2152,7 +2184,7 @@ def read_file_info(path: Path, display_name=None):
             if "fabric.mod.json" in names or "quilt.mod.json" in names:
                 meta_name = "quilt.mod.json" if "quilt.mod.json" in names else "fabric.mod.json"
                 try:
-                    meta = json.loads(z.read(meta_name).decode("utf-8", "replace"), strict=False)
+                    meta = json.loads(zread(z, meta_name).decode("utf-8", "replace"), strict=False)
                     if meta_name == "quilt.mod.json":
                         ql = meta.get("quilt_loader", {})
                         info["mod_ids"] = [ql.get("id")]
@@ -2175,7 +2207,7 @@ def read_file_info(path: Path, display_name=None):
                     pass
             for toml in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
                 if toml in names:
-                    text = z.read(toml).decode("utf-8", "replace")
+                    text = zread(z, toml).decode("utf-8", "replace")
                     info["mod_ids"] = re.findall(r'^\s*modId\s*=\s*"([^"]+)"', text, re.M)[:1] or info["mod_ids"]
                     m = re.search(r'^\s*displayName\s*=\s*"([^"]+)"', text, re.M)
                     if m:
@@ -2188,7 +2220,7 @@ def read_file_info(path: Path, display_name=None):
                         cands += MC_VERSION_RE.findall(m.group(1))
                     break
             if icon_path and icon_path.lstrip("/") in names:
-                data = z.read(icon_path.lstrip("/"))
+                data = zread(z, icon_path.lstrip("/"))
                 if len(data) < 150_000 and data[:8] == b"\x89PNG\r\n\x1a\n":
                     import base64
                     info["icon"] = "data:image/png;base64," + base64.b64encode(data).decode()
@@ -2612,7 +2644,8 @@ def port_start_job(job, key, gv, loader):
     job.progress = 0.2
     if not (folder / ".git").exists():
         job.log(f"Downloading the source of {info['name']} from {info['repo']}...")
-        r = subprocess.run([find_tool("git") or "git", "clone", "--depth", "1", info["repo"], str(folder)],
+        r = subprocess.run([find_tool("git") or "git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                            "clone", "--depth", "1", "--", info["repo"], str(folder)],
                            capture_output=True, text=True, timeout=600,
                            creationflags=0x08000000 if platform.system() == "Windows" else 0)
         if r.returncode != 0:
@@ -2722,18 +2755,9 @@ def read_update_file(path: Path):
 
 
 def update_search_dirs():
-    home = Path.home()
-    dirs = [UPDATES_DIR, home / "Downloads", home / "Desktop", Path(__file__).resolve().parent]
-    if platform.system() == "Windows":
-        prof = Path(os.environ.get("USERPROFILE", home))
-        dirs += [prof / "Downloads", prof / "OneDrive" / "Desktop", prof / "OneDrive" / "Downloads"]
-    out, seen = [], set()
-    for d in dirs:
-        key = str(d).lower()
-        if key not in seen and d.is_dir():
-            seen.add(key)
-            out.append(d)
-    return out
+    """Updates ModHub downloaded from GitHub itself. (It no longer picks up modhub.py files lying in Downloads:
+    a website could drop one there. Install from a file is still there when you mean it.)"""
+    return [UPDATES_DIR] if UPDATES_DIR.is_dir() else []
 
 
 THEME_MODES = ("dark", "light", "system")
@@ -2845,7 +2869,8 @@ DEFAULT_UPDATE_SOURCE = os.environ.get("MODHUB_UPDATE_SOURCE", "stefantay25-ux/m
 
 
 def current_update_source(cfg=None):
-    return ((cfg if cfg is not None else CFG).get("update_source") or DEFAULT_UPDATE_SOURCE).strip()
+    # Always the official repo. (An old setting, or a tampered backup, can't point updates somewhere else.)
+    return DEFAULT_UPDATE_SOURCE.strip()
 
 
 def update_source_url(src):
@@ -3370,15 +3395,6 @@ def api(path, body):
         return {"focused": focus_native_window()}
     if path == "/api/window/setup":
         return {"job": start_job(install_webview_job)}
-    if path == "/api/update/source":
-        src = (body.get("source") or "").strip()
-        update_source_url(src)  # raises a friendly error if it doesn't look right
-        with CFG_LOCK:
-            CFG["update_source"] = src
-            CFG.pop("update_last_check", None)
-            save_config(CFG)
-        result = check_online_update() if src else None
-        return {**state(), "check": result}
     if path == "/api/update/auto":
         with CFG_LOCK:
             CFG["update_auto"] = bool(body.get("on"))
@@ -3439,6 +3455,12 @@ def api(path, body):
     raise UserError("Not found")
 
 
+# What ModHub's page may load: its own code, pictures from the web, nothing else.
+PAGE_CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; media-src 'none'; "
+            "object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ModHub"
 
@@ -3449,6 +3471,17 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").split(":")[0]
         return host in ("127.0.0.1", "localhost")
 
+    def _origin_ok(self):
+        """Requests must come from ModHub's own page, never from another website open in your browser."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True  # not sent by a web page (or same-origin GET)
+        port = self.server.server_address[1]
+        return origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+
+    def _token_ok(self, given):
+        return isinstance(given, str) and secrets.compare_digest(given.encode(), TOKEN.encode())
+
     def _send(self, code, payload, ctype="application/json"):
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.send_response(code)
@@ -3456,6 +3489,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy", PAGE_CSP)
         self.end_headers()
         self.wfile.write(data)
 
@@ -3465,7 +3504,7 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             if n <= 0 or n > 300_000_000:
                 raise UserError("That file is empty or too big.")
-            name = urllib.parse.unquote(self.headers.get("X-Filename") or "file.jar")
+            name = safe_filename(urllib.parse.unquote(self.headers.get("X-Filename") or "file.jar"))
             if not name.lower().endswith((".jar", ".zip")):
                 raise UserError(f"{name} isn't a mod (.jar) or resource pack (.zip).")
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -3511,19 +3550,23 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/icon.png":
             return self._send(200, icon_png(192), "image/png")
         if u.path == "/":
-            if urllib.parse.parse_qs(u.query).get("t", [""])[0] != TOKEN:
+            if not self._token_ok(urllib.parse.parse_qs(u.query).get("t", [""])[0]):
                 return self._send(403, b"Open ModHub from its shortcut, or start it again.", "text/plain")
             return self._send(200, page_html().encode(), "text/html; charset=utf-8")
         self._send(404, {"error": "not found"})
 
     def do_POST(self):
-        if not self._host_ok() or self.headers.get("X-Token") != TOKEN:
+        if not self._host_ok() or not self._origin_ok() or not self._token_ok(self.headers.get("X-Token")):
             return self._send(403, {"error": "forbidden"})
         if urllib.parse.urlparse(self.path).path in ("/api/local/upload", "/api/backup/restore"):
             return self._upload()
         try:
             n = int(self.headers.get("Content-Length") or 0)
+            if n < 0 or n > 2_000_000:
+                return self._send(413, {"error": "Request too big."})
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            if not isinstance(body, dict):
+                raise UserError("Bad request.")
             self._send(200, api(urllib.parse.urlparse(self.path).path, body))
         except UserError as e:
             self._send(400, {"error": str(e)})
@@ -4288,6 +4331,7 @@ def main():
     url = f"http://127.0.0.1:{port}/?t={TOKEN}"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     RUNNING_FILE.write_text(json.dumps({"port": port, "token": TOKEN, "pid": os.getpid()}), "utf-8")
+    private(RUNNING_FILE)
     print(f"ModHub {APP_VERSION} is running at {url}")
     if FROZEN and platform.system() == "Windows":  # the app started fine: modhub.py can hand over to it from now on
         with CFG_LOCK:
@@ -6875,7 +6919,7 @@ function showJustUpdated(ju) {
   const newer = (a, b) => { const x = vt(a), y = vt(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
   const list = (S.changelog || []).filter(e => newer(e.version, ju.from) && !newer(e.version, ju.to));
   markNotesSeen();
-  if (!showWhatsNew(list, `ModHub updated to ${ju.to}`, `Here's what's new since ${ju.from}.`, list.map(e => e.version))) toast(`Updated to ModHub ${ju.to}`);
+  showWhatsNew(list, `ModHub updated to ${ju.to}`, `Here's what's new since ${ju.from}.`, list.map(e => e.version));  // small fixes update silently
 }
 $("#updNotes").onclick = () => showHistory();
 $("#aboutNotes").onclick = () => showHistory();
