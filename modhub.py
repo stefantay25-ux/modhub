@@ -3140,7 +3140,7 @@ def state():
             "data_dir": str(DATA_DIR), "in_window": APP["proc"] is not None or APP["webview"] is not None,
             "shortcut_done": bool(cfg.get("shortcut_done")), "platform": platform.system(),
             "native": APP["webview"] is not None, "webview_installed": has_webview(),
-            "native_broken": cfg.get("native_broken"), "version": APP_VERSION, "update": find_update(), "changelog": APP_CHANGES,
+            "native_broken": native_broken_now(cfg), "version": APP_VERSION, "update": find_update(), "changelog": APP_CHANGES,
             "has_backup": any((DATA_DIR / "backups").glob("modhub-*.py")) if (DATA_DIR / "backups").is_dir() else False,
             "loadouts": loadouts_view(CFG), "active_loadout": cfg.get("active_loadout"),
             "installs": cfg.get("installs", []), "caught_up": cfg.get("caught_up", []),
@@ -4172,17 +4172,24 @@ WINDOW = {"child": None, "shown": threading.Event(), "error": None}
 NATIVE_TIMEOUT = float(os.environ.get("MODHUB_NATIVE_TIMEOUT", "25"))
 
 
-def native_allowed():
+def native_broken_now(cfg=None):
+    """A failed window only counts for the same version of ModHub, run the same way: every update tries again."""
     with CFG_LOCK:
-        broken = CFG.get("native_broken")
-    return has_webview() and not broken
+        nb = (cfg if cfg is not None else CFG).get("native_broken")
+    if not isinstance(nb, dict) or nb.get("version") != APP_VERSION or bool(nb.get("frozen")) != FROZEN:
+        return None
+    return nb
+
+
+def native_allowed():
+    return has_webview() and not native_broken_now()
 
 
 def mark_native_broken(reason):
     print(f"ModHub's own window didn't open: {reason}")
     WINDOW["error"] = reason
     with CFG_LOCK:
-        CFG["native_broken"] = {"reason": reason, "when": now_iso(), "version": APP_VERSION}
+        CFG["native_broken"] = {"reason": reason, "when": now_iso(), "version": APP_VERSION, "frozen": FROZEN}
         save_config(CFG)
 
 
@@ -4202,6 +4209,7 @@ def start_window_helper(url):
             return True
         code = child.poll()
         if code is not None:
+            print(f"Window helper exited with code {code}")
             mark_native_broken("it closed as soon as it started")
             return False
     mark_native_broken(f"it didn't appear within {NATIVE_TIMEOUT} seconds")
@@ -4287,6 +4295,12 @@ def run_window_helper(url):
 def main():
     setup_logging()
     if "--window" in sys.argv:
+        try:
+            import faulthandler  # a crash inside the window engine still leaves a note in the log
+            faulthandler.enable(file=sys.stderr)
+        except Exception:
+            pass
+        print(f"Window helper starting (Python {sys.version.split()[0]}, {'app' if FROZEN else 'script'})")
         try:
             run_window_helper(sys.argv[sys.argv.index("--window") + 1])
         except Exception:
