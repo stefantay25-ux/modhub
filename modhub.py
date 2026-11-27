@@ -53,10 +53,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.5.3"
+APP_VERSION = "3.6"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.6", "notes": [
+        "New: ModHub fixes \"Incompatible mods found!\" by itself. When Fabric, Quilt, NeoForge or Forge stops the game because mods don't work together, ModHub does what the error asks: adds missing mods, swaps in versions that fit, and turns off a mod that clashes.",
+        "You'll see \"Fixing\" and then \"Fixed\" at the top of ModHub, with a list of what changed. Then just start Minecraft again.",
+        "Downloads that fail or arrive damaged are now retried automatically.",
+    ]},
     {"version": "3.5", "notes": [
         "On Windows, the Python version of ModHub now turns itself into the ModHub app by itself, so it always gets its own window instead of an Edge or Chrome one.",
         "Your desktop and Start menu shortcuts then open the app, and so does modhub.py.",
@@ -203,7 +208,20 @@ def safe_filename(name):
     return base
 
 
-def download(url, dest: Path, expected_sha1=None):
+def download(url, dest: Path, expected_sha1=None, attempts=3):
+    """Download with a few automatic retries: a dropped connection or a damaged file is tried again."""
+    for n in range(attempts):
+        try:
+            return _download_once(url, dest, expected_sha1)
+        except UserError:
+            raise
+        except Exception:
+            if n == attempts - 1:
+                raise
+            time.sleep(1.5 * (n + 1))
+
+
+def _download_once(url, dest: Path, expected_sha1=None):
     if not str(url).startswith("https://"):
         raise UserError("Refused to download over an insecure connection.")
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -1348,6 +1366,136 @@ def diagnose_crash(text, mods_dir: Path):
     return d
 
 
+# ---- auto-fix for "Incompatible mods found!" and missing-dependency errors ----
+# Fabric and Quilt print the fix themselves ("Install X", "Replace Y with...", "Remove mod Z"), and
+# NeoForge/Forge list missing or wrong dependencies. ModHub reads those and carries them out.
+SKIP_DEPS = {"minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader", "forge", "neoforge", "fml", "javafml"}
+
+
+def _fabric_pred(spec):
+    """Fabric's English ("version 1.2 or later", "any version between 1 and 2 (exclusive)") as a version rule."""
+    sp = (spec or "").strip().rstrip(".!")
+    v = r"([0-9][\w.+\-]*)"
+    for pat, fmt in ((rf"between {v} and {v}", ">={0} <{1}"), (rf"{v} or later", ">={0}"), (rf"{v} or earlier", "<={0}"),
+                     (rf"(?:later than|after) {v}", ">{0}"), (rf"(?:earlier than|before) {v}", "<{0}"),
+                     (rf"version {v}\b", "{0}")):
+        m = re.search(pat, sp)
+        if m:
+            return fmt.format(*m.groups())
+    return "*"
+
+
+def parse_mod_errors(text, mods_dir: Path):
+    """The fixes a mod-loading error asks for, as problems ModHub's fixer understands, plus mods to turn off."""
+    idx = _mods_index(mods_dir)
+    find = lambda mid, name="": idx.get((mid or "").lower()) or idx.get((name or "").lower())
+    out, seen = [], set()
+
+    def add(item):
+        key = (item["type"], (item.get("on") or item.get("file") or "").lower())
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+
+    def missing(dep, by="a mod"):
+        if dep.lower() not in SKIP_DEPS and not find(dep):
+            add({"type": "missing", "on": dep, "mod": by, "file": "", "want": None, "style": "fabric",
+                 "message": f"{by} needs {dep}, which isn't installed."})
+
+    def needs(dep, dep_name, have, pred, style, by="a mod"):
+        m = find(dep, dep_name)
+        if m:
+            add({"type": "needs_version", "on": m["id"], "on_name": m["name"], "on_file": m["file"], "have": have or "",
+                 "want": pred, "style": style, "mod": by, "file": m["file"],
+                 "message": f"{by} needs a different version of {m['name']}."})
+
+    # Fabric / Quilt: the suggested solution
+    for m in re.finditer(r"^\s*-\s*Install ([\w.\-]+)(?:,\s*(.+?))?\.?\s*$", text, re.M):
+        missing(m.group(1), "Fabric")
+    for m in re.finditer(r"^\s*-\s*Replace (?:mod )?'([^']+)' \(([^)]+)\) (\S+) with (.+?)\.?\s*$", text, re.M):
+        needs(m.group(2), m.group(1), m.group(3), _fabric_pred(m.group(4)), "fabric", "Fabric")
+    for m in re.finditer(r"^\s*-\s*Remove mod '([^']+)' \(([^)]+)\)", text, re.M):
+        mm = find(m.group(2), m.group(1))
+        if mm:
+            add({"type": "remove", "file": mm["file"], "on_name": m.group(1) or mm["name"], "on": mm["id"]})
+    # Fabric / Quilt: the details (older loaders print only these)
+    for m in re.finditer(r"Mod '([^']+)' \(([^)]+)\) \S+ requires (.+?) of (?:mod )?'?([^'(]+?)'? \(([^)]+)\), which is missing", text):
+        missing(m.group(5), m.group(1))
+    for m in re.finditer(r"Mod '([^']+)' \(([^)]+)\) (\S+) requires (.+?) of (?:mod )?'([^']+)' \(([^)]+)\), "
+                         r"but only the wrong version is present: ([^!\n]+)", text):
+        if m.group(6).lower() == "minecraft":  # the mod is made for another Minecraft: get the right build of it
+            needs(m.group(2), m.group(1), m.group(3), "*", "fabric", m.group(1))
+        elif m.group(6).lower() not in SKIP_DEPS:
+            needs(m.group(6), m.group(5), m.group(7).strip(), _fabric_pred(m.group(4)), "fabric", m.group(1))
+    # NeoForge / Forge
+    for m in re.finditer(r"Mod ID: '([^']+)', Requested by: '([^']+)', Expected range: '([^']+)', Actual version: '([^']+)'", text):
+        dep, by, rng, actual = m.groups()
+        if dep.lower() in SKIP_DEPS:
+            continue
+        by_name = (find(by) or {}).get("name", by)
+        if "MISSING" in actual.upper():
+            missing(dep, by_name)
+        else:
+            needs(dep, "", actual, rng, "maven", by_name)
+    return out
+
+
+def autofix_mods_job(job, iid, text):
+    """Carry out what the game's error asked for, then check the whole instance."""
+    with CFG_LOCK:
+        rec = next((dict(r) for r in CFG.get("installs", []) if r["id"] == iid), None)
+    if not rec or not rec.get("path"):
+        raise UserError("ModHub can't change that instance.")
+    folder = Path(rec["path"])
+    actions = parse_mod_errors(text, folder)
+    done = []
+    for a in [a for a in actions if a["type"] == "remove"]:
+        try:
+            turn_off_mod(iid, a["file"])
+            done.append(f"Turned off {a['on_name']}, which doesn't work with your other mods.")
+            job.log(f"  turned off {a['on_name']}")
+        except UserError:
+            pass
+    problems = [a for a in actions if a["type"] != "remove"]
+    if problems:
+        job.log("Doing what the game asked for...")
+        problems = fix_problems(job, folder, problems, rec["version"], rec["loader"], managed=True)
+    more = check_and_fix(job, folder, rec["version"], rec["loader"], managed=True)
+    for p in problems + more:
+        if p.get("status") == "fixed" and p.get("fix") and p["fix"] not in done:
+            done.append(p["fix"])
+    still, seen = [], set()
+    for p in more + problems:  # what's left: from the full check, and anything the game asked for that couldn't be done
+        if p.get("status") == "open" and p.get("message") and p["message"] not in seen:
+            seen.add(p["message"])
+            still.append(p)
+    return {"fixed": done, "still": still, "install_id": iid, "instance": rec["name"]}
+
+
+def start_autofix(iid, text):
+    """Fix a crashed instance in the background and record how it went on the crash."""
+    def set_fix(info):
+        with CFG_LOCK:
+            for c in CFG.get("crashes", []):
+                if c["install_id"] == iid:
+                    c["autofix"] = info
+            save_config(CFG)
+
+    def runner(job):
+        set_fix({"status": "fixing"})
+        try:
+            res = autofix_mods_job(job, iid, text)
+        except Exception as e:
+            traceback.print_exc()
+            set_fix({"status": "failed", "error": str(e)[:300]})
+            raise
+        status = "fixed" if res["fixed"] and not res["still"] else "partly" if res["fixed"] else "failed"
+        set_fix({"status": status, "fixed": res["fixed"],
+                 "still": [{"message": p["message"], "file": p.get("file"), "mod": p.get("mod")} for p in res["still"]]})
+        return res
+    return start_job(runner)
+
+
 def _newest_crash_file(game_dir: Path, after: float):
     """The newest crash report, or the game log if the last run ended in an error."""
     cands = []
@@ -1403,7 +1551,11 @@ def scan_crashes():
                 if x["id"] == r["id"]:
                     x["crash_seen"] = f.stat().st_mtime
             CFG["crashes"] = [c for c in CFG.get("crashes", []) if c["install_id"] != r["id"]] + [crash]
+            auto = CFG.get("autofix_mods", True)
             save_config(CFG)
+        if auto and d["kind"] == "clash":  # "Incompatible mods found!": fix it without being asked
+            crash["autofix"] = {"status": "fixing"}
+            start_autofix(r["id"], text)
     return new
 
 
@@ -3279,6 +3431,15 @@ def api(path, body):
     if path == "/api/crashes/scan":
         scan_crashes()
         return {"crashes": CFG.get("crashes", [])}
+    if path == "/api/crashes/fix":
+        c = next((c for c in CFG.get("crashes", []) if c["install_id"] == body.get("id")), None)
+        if not c:
+            raise UserError("That crash isn't here any more.")
+        try:
+            text = Path(c["file"]).read_text("utf-8", "replace")[-200000:]
+        except OSError:
+            text = ""
+        return {"job": start_autofix(c["install_id"], text)}
     if path == "/api/crashes/dismiss":
         with CFG_LOCK:
             CFG["crashes"] = [c for c in CFG.get("crashes", []) if c["install_id"] != body.get("id")]
@@ -5185,6 +5346,13 @@ details.adv[open] > *:not(summary){margin-top:14px}
 .steps-list span{grid-column:2;color:var(--muted);font-size:13px;line-height:1.45}
 .steps-list .btn{grid-column:3;grid-row:1 / 3}
 .howto kbd{font:600 11px/1 var(--body);padding:3px 6px;border-radius:5px;background:var(--stone-3);color:var(--muted)}
+
+/* auto-fixed crashes */
+.prob.done b{text-decoration:none;color:var(--text);font-weight:600}
+.crashn.fixing{background:linear-gradient(90deg,rgb(var(--acc) / .12),var(--stone-2) 60%);border-color:var(--accent-edge)}
+.crashn.fixing .boom{background:var(--accent-tint);color:var(--accent-2)}
+.crashn.ok{background:linear-gradient(90deg,color-mix(in srgb,var(--ready) 14%,transparent),var(--stone-2) 60%);border-color:color-mix(in srgb,var(--ready) 32%,var(--stone))}
+.crashn.ok .boom{background:color-mix(in srgb,var(--ready) 18%,transparent);color:var(--ready)}
 /* ---------- 3.1: backgrounds, customisation, cards ---------- */
 :root{zoom:var(--ui-zoom,1);--gdir:180deg;--gpos:50% -12%}
 :root[data-dir="corner"]{--gdir:150deg;--gpos:0% 0%}
@@ -6787,17 +6955,31 @@ async function checkInstance(id, btn) {
 }
 
 /* ---------- crash helper ---------- */
+let crashPoll = null;
+function crashLine(c) {
+  const fx = c.autofix || {};
+  if (fx.status === "fixing") return {cls: "fixing", icon: `<span class="spin"></span>`, title: `Fixing ${c.instance}`,
+    text: "Minecraft said some mods don't work together. ModHub is sorting it out by itself.", show: ""};
+  if (fx.status === "fixed") return {cls: "ok", icon: "✓", title: `Fixed ${c.instance}`,
+    text: `${fx.fixed.length === 1 ? fx.fixed[0] : `ModHub made ${fx.fixed.length} fixes so your mods work together.`} Start Minecraft again.`, show: "See what changed"};
+  if (fx.status === "partly") return {cls: "", icon: "!", title: `Fixed part of ${c.instance}`,
+    text: `ModHub fixed ${fx.fixed.length}, but ${fx.still.length} ${fx.still.length === 1 ? "problem needs" : "problems need"} you.`, show: "See what's left"};
+  return {cls: "", icon: "!", title: `${c.instance} crashed ${timeAgo(c.at)}`, text: `${c.title}.`, show: "See what happened"};
+}
 function renderCrashes() {
   const list = S.crashes || [];
-  $("#crashBox").innerHTML = list.map(c => `
-    <div class="crashn rise" data-crash="${esc(c.install_id)}"><div class="boom">!</div>
-      <div class="grow"><b>${esc(c.instance)} crashed ${esc(timeAgo(c.at))}</b><p>${esc(c.title)}.</p></div>
-      <button class="btn go sm" data-cshow>See what happened</button>
-      <button class="btn quiet sm" data-cdis>Dismiss</button></div>`).join("");
+  $("#crashBox").innerHTML = list.map(c => { const l = crashLine(c); return `
+    <div class="crashn rise ${l.cls}" data-crash="${esc(c.install_id)}"><div class="boom">${l.icon}</div>
+      <div class="grow"><b>${esc(l.title)}</b><p>${esc(l.text)}</p></div>
+      ${l.show ? `<button class="btn ${l.cls === "ok" ? "" : "go"} sm" data-cshow>${l.show}</button>` : ""}
+      ${l.cls === "fixing" ? "" : `<button class="btn quiet sm" data-cdis>Dismiss</button>`}</div>`; }).join("");
+  clearTimeout(crashPoll);
+  if (list.some(c => (c.autofix || {}).status === "fixing")) crashPoll = setTimeout(refreshCrashes, 2500);
   $$("#crashBox .crashn").forEach(el => {
     const id = el.dataset.crash;
-    el.querySelector("[data-cshow]").onclick = () => openCrash(id);
-    el.querySelector("[data-cdis]").onclick = async () => { S.crashes = (await api("/api/crashes/dismiss", {id})).crashes; renderCrashes(); renderInstances(); };
+    const sh = el.querySelector("[data-cshow]"), di = el.querySelector("[data-cdis]");
+    if (sh) sh.onclick = () => openCrash(id);
+    if (di) di.onclick = async () => { S.crashes = (await api("/api/crashes/dismiss", {id})).crashes; renderCrashes(); renderInstances(); };
   });
   const navI = $(".nav[data-tab=instances]");
   if (list.length && !navI.querySelector(".dot-new")) navI.insertAdjacentHTML("beforeend", `<span class="dot-new" title="An instance crashed"></span>`);
@@ -6805,16 +6987,21 @@ function renderCrashes() {
 function openCrash(id) {
   const c = (S.crashes || []).find(x => x.install_id === id);
   if (!c) return;
-  const culprits = c.culprits || [];
+  const fx = c.autofix || {};
+  const culprits = fx.status ? [] : (c.culprits || []);
+  const fixedRows = (fx.fixed || []).map(t => `<div class="prob fixed done"><div class="ic">✓</div><div class="grow"><b>${esc(t)}</b></div></div>`).join("");
+  const stillRows = (fx.still || []).map(p => `<div class="prob open"><div class="ic">!</div><div class="grow"><b>${esc(p.message)}</b>
+      ${p.file ? `<div class="actions"><button class="btn sm" data-coff="${esc(p.file)}">Turn off ${esc(p.mod || "this mod")}</button></div>` : ""}</div></div>`).join("");
   $("#crashBody").innerHTML = `
-    <h2 id="crashTitle">${esc(c.title)}</h2>
-    <p class="lede">${esc(c.instance)}, Minecraft ${esc(c.version)} with ${LOADER_NAMES[c.loader] || esc(c.loader)}. ${esc(c.explain)}</p>
+    <h2 id="crashTitle">${esc(fx.status === "fixed" ? `ModHub fixed ${c.instance}` : c.title)}</h2>
+    <p class="lede">${esc(c.instance)}, Minecraft ${esc(c.version)} with ${LOADER_NAMES[c.loader] || esc(c.loader)}. ${esc(fx.status === "fixed" ? "Minecraft said some mods didn't work together. Here's what ModHub did. Start the game again." : fx.status === "partly" ? "ModHub fixed what it could. The rest needs you." : c.explain)}</p>
+    ${fixedRows}${stillRows}
     ${culprits.map(m => `<div class="prob open"><div class="ic">!</div><div class="grow"><b>${esc(m.name)}</b><p>Named in the crash report.</p>
         <div class="actions"><button class="btn sm" data-coff="${esc(m.file)}">Turn off ${esc(m.name)}</button></div></div></div>`).join("")}
     ${c.error ? `<div class="errline">${esc(c.error)}</div>` : ""}
     <div class="foot" style="justify-content:space-between;flex-wrap:wrap">
       <span class="actions"><button class="btn quiet" id="crashCopy">Copy for Claude</button><button class="btn quiet" id="crashOpen">Open crash report</button></span>
-      <span class="actions">${c.fix_check ? `<button class="btn go" id="crashFix">Fix it</button>` : ""}<button class="btn ${c.fix_check ? "" : "go"}" data-close>Done</button></span>
+      <span class="actions">${c.fix_check && fx.status !== "fixed" ? `<button class="btn go" id="crashFix">${fx.status ? "Try again" : "Fix it"}</button>` : ""}<button class="btn ${c.fix_check && fx.status !== "fixed" ? "" : "go"}" data-close>Done</button></span>
     </div>`;
   openModal("#crashModal");
   $$("#crashBody [data-coff]").forEach(b => b.onclick = async () => {
@@ -6833,15 +7020,24 @@ function openCrash(id) {
   $("#crashOpen").onclick = () => api("/api/open", {path: c.file}).catch(e => toast(e.message));
   const fix = $("#crashFix");
   if (fix) fix.onclick = async () => {
-    closeModals();
-    S.crashes = (await api("/api/crashes/dismiss", {id})).crashes; renderCrashes();
-    go("instances");
-    const b = $(`.inst[data-inst="${CSS.escape(id)}"] [data-icheck]`);
-    if (b) checkInstance(id, b);
+    fix.disabled = true; fix.innerHTML = `<span class="spin"></span> Fixing`;
+    try {
+      const {job} = await api("/api/crashes/fix", {id});
+      await follow(job, () => {});
+    } catch (e) { toast(e.message); }
+    await refreshCrashes(true);
+    openCrash(id);
   };
 }
-async function refreshCrashes() {
-  try { const r = await api("/api/crashes/scan"); if (JSON.stringify(r.crashes) !== JSON.stringify(S.crashes)) { S.crashes = r.crashes; renderCrashes(); renderInstances(); } } catch (e) {}
+async function refreshCrashes(force = false) {
+  try {
+    const r = await api("/api/crashes/scan");
+    if (force || JSON.stringify(r.crashes) !== JSON.stringify(S.crashes)) {
+      const was = (S.crashes || []).filter(c => (c.autofix || {}).status === "fixing").map(c => c.install_id);
+      S.crashes = r.crashes; renderCrashes(); renderInstances();
+      r.crashes.filter(c => was.includes(c.install_id) && (c.autofix || {}).status === "fixed").forEach(c => { toast(`Fixed ${c.instance}. Start Minecraft again`); burst($(`#crashBox [data-crash="${CSS.escape(c.install_id)}"]`)); });
+    }
+  } catch (e) {}
 }
 setInterval(refreshCrashes, 60 * 1000);
 window.addEventListener("focus", refreshCrashes);
