@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
@@ -3905,8 +3905,8 @@ PAGE = r'''<!DOCTYPE html>
   --accent:#d7263d; --accent-2:#ec3a50; --accent-ink:#ffffff; --accent-tint:#2a1216;
   --amber:#f0a43a; --attn:#7cb8ff; --ready:#45b97c; --missing:#ff5a5f; --link:#ff7f8c;
   --mr:#1bd96a; --cf:#f16436;
-  --display: ui-rounded, "SF Pro Rounded", "Nunito", "Segoe UI Variable Display", system-ui, sans-serif;
-  --body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --display: "Segoe UI Variable Display", ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
+  --body: "Segoe UI Variable Text", "Segoe UI Variable", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -4344,13 +4344,126 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
 
 #burst{position:fixed;inset:0;pointer-events:none;z-index:60}
 
+
+/* ---------- premium pass 2 ---------- */
+.n,.count,.now,.tag,.version,.inst-ico,#ringPct,.pal .hint,.big{font-variant-numeric:tabular-nums}
+h1{font-variation-settings:"wght" 760;letter-spacing:-.7px}
+
+/* sidebar search pill */
+.kpill{white-space:nowrap;display:flex;align-items:center;gap:9px;margin:-8px 0 14px;padding:0 10px 0 12px;height:36px;border-radius:9px;border:1px solid #26262c;background:#141417;color:var(--faint);cursor:pointer;font-size:13.5px;text-align:left;width:100%;transition:border-color .2s,color .2s,background .2s}
+.kpill:hover{border-color:var(--edge);color:var(--muted);background:#17171b}
+.kpill svg{width:15px;height:15px;flex:none}
+.kpill kbd,.pal kbd{margin-left:auto;white-space:nowrap;font:600 11px/1 var(--body);padding:4px 6px;border-radius:5px;background:var(--stone-3);color:var(--muted);box-shadow:inset 0 -1px 0 rgba(0,0,0,.4)}
+
+/* command palette */
+.pal-scrim{position:fixed;inset:0;z-index:70;background:rgba(5,5,7,.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;justify-content:center;align-items:flex-start;padding-top:13vh;animation:fadeIn .15s ease}
+.pal{width:min(620px,92vw);background:rgba(24,24,28,.92);backdrop-filter:blur(18px) saturate(140%);-webkit-backdrop-filter:blur(18px) saturate(140%);border:1px solid rgba(255,255,255,.08);border-radius:14px;overflow:hidden;
+  box-shadow:0 50px 100px -30px rgba(0,0,0,.9),0 0 0 1px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);animation:palIn .22s cubic-bezier(.2,1.2,.4,1)}
+@keyframes palIn{from{opacity:0;transform:translateY(-8px) scale(.97)}}
+.pal-q{display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid rgba(255,255,255,.06)}
+.pal-q svg{width:18px;height:18px;color:var(--accent-2);flex:none}
+.pal-q input{height:56px;border:0;background:none;font-size:17px;padding:0}
+.pal-q input:focus{box-shadow:none}
+.pal-list{max-height:min(420px,56vh);overflow:auto;padding:6px}
+.pal-g{padding:10px 12px 4px;font-size:12px;color:var(--faint);font-weight:650}
+.pi{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;cursor:pointer;color:var(--muted)}
+.pi .pico{width:28px;height:28px;border-radius:7px;background:var(--stone-3);display:grid;place-items:center;flex:none;overflow:hidden;color:var(--text)}
+.pi .pico img{width:100%;height:100%;object-fit:cover}
+.pi .pico svg{width:15px;height:15px}
+.pi .pt{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pi .ps{font-size:12.5px;color:var(--faint);margin-left:auto;white-space:nowrap;padding-left:12px}
+.pi mark{background:none;color:var(--accent-2)}
+.pi.sel{background:linear-gradient(90deg,rgba(215,38,61,.2),rgba(215,38,61,.06));color:var(--text);box-shadow:inset 2px 0 0 var(--accent-2)}
+.pi.sel .pico{background:var(--accent);color:#fff}
+.pal-foot{display:flex;gap:16px;padding:9px 16px;border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:var(--faint)}
+.pal-foot kbd{margin:0 4px 0 0}
+.pal-none{padding:22px 16px;color:var(--faint);text-align:center}
+
+/* switches instead of checkboxes */
+.check input[type=checkbox]{appearance:none;-webkit-appearance:none;width:36px;height:21px;border-radius:21px;background:var(--stone-3);border:1px solid var(--edge);position:relative;cursor:pointer;flex:none;margin:0;
+  transition:background .22s,border-color .22s,box-shadow .22s}
+.check input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#cfccd2;box-shadow:0 1px 3px rgba(0,0,0,.5);transition:transform .25s cubic-bezier(.3,1.5,.5,1),background .2s}
+.check input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent-2);box-shadow:0 0 14px -2px rgba(236,58,80,.6)}
+.check input[type=checkbox]:checked::after{transform:translateX(15px);background:#fff}
+.check:hover input[type=checkbox]:not(:checked){border-color:#4b4b55}
+.check{gap:10px}
+
+/* dropdowns with a chevron */
+select{appearance:none;-webkit-appearance:none;padding-right:34px;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a9a6ad' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center}
+select:hover{border-color:#4b4b55}
+select option{background:var(--stone-2)}
+
+/* button ripple */
+.btn{position:relative;overflow:hidden;transition:background .18s,border-color .18s,transform .15s,box-shadow .2s}
+.btn:active:not(:disabled){transform:translateY(0) scale(.97)}
+.ripple{position:absolute;border-radius:50%;background:rgba(255,255,255,.32);transform:scale(0);animation:ripple .6s cubic-bezier(.2,.8,.3,1) forwards;pointer-events:none}
+@keyframes ripple{to{transform:scale(1);opacity:0}}
+
+/* frosted page bar on scroll */
+.topbar{position:fixed;top:0;left:232px;right:0;z-index:30;height:56px;display:flex;align-items:center;gap:14px;padding:0 48px;
+  background:rgba(19,19,22,.72);backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);border-bottom:1px solid rgba(255,255,255,.06);
+  box-shadow:0 12px 30px -18px rgba(0,0,0,.8);transform:translateY(-102%);transition:transform .32s cubic-bezier(.2,.9,.3,1)}
+.topbar.show{transform:none}
+.topbar .tt{font:800 17px/1 var(--display);letter-spacing:-.2px;opacity:0;transform:translateY(8px) scale(1.25);transform-origin:left center;transition:opacity .3s .05s,transform .4s .05s cubic-bezier(.2,.9,.3,1)}
+.topbar.show .tt{opacity:1;transform:none}
+.topbar .top-up{margin-left:auto}
+
+/* live install view */
+.live{display:flex;gap:20px;align-items:flex-start;padding:18px 20px;border-radius:14px;background:var(--stone-2);border:1px solid #26262c}
+.ring{position:relative;width:74px;height:74px;flex:none}
+.ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:6}
+.ring .trk{stroke:#101013}
+.ring .arc{stroke:url(#ringGrad);stroke-linecap:round;stroke-dasharray:175.93;stroke-dashoffset:175.93;transition:stroke-dashoffset .5s cubic-bezier(.3,1,.5,1);filter:drop-shadow(0 0 6px rgba(236,58,80,.55))}
+.ring #ringPct{position:absolute;inset:0;display:grid;place-items:center;font:800 17px var(--display)}
+.ring.done .arc{stroke:var(--ready);filter:drop-shadow(0 0 6px rgba(69,185,124,.6))}
+.live .grow{flex:1;min-width:0}
+.live b{font:700 17px/1.3 var(--display)}
+.live .now{margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.livelist{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;max-height:132px;overflow:hidden;-webkit-mask-image:linear-gradient(to bottom,#000 75%,transparent)}
+.livelist:empty{display:none}
+.livelist span{font-size:12.5px;padding:4px 10px;border-radius:7px;background:#25252b;color:var(--text);display:inline-flex;align-items:center;gap:6px;animation:chipIn .4s cubic-bezier(.2,1.4,.4,1)}
+.livelist span::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--ready)}
+@keyframes chipIn{from{opacity:0;transform:translateY(6px) scale(.8)}}
+.progress .bar{display:none}
+
+/* hover labels on slots */
+#tip{position:fixed;z-index:80;pointer-events:none;max-width:260px;padding:8px 11px;border-radius:9px;background:rgba(14,14,17,.94);border:1px solid rgba(255,255,255,.08);
+  box-shadow:0 18px 40px -12px rgba(0,0,0,.9);font-size:12.5px;line-height:1.4;color:var(--muted);opacity:0;transform:translateY(4px);transition:opacity .14s,transform .18s}
+#tip.on{opacity:1;transform:none}
+#tip b{display:block;color:var(--text);font-size:13.5px;margin-bottom:1px}
+#tip em{display:block;font-style:normal;color:var(--accent-2);margin-top:4px;font-size:12px}
+
+/* empty states */
+.empty .art{display:block;width:84px;height:84px;margin:0 auto 14px;image-rendering:pixelated;filter:drop-shadow(0 10px 18px rgba(0,0,0,.6))}
+.empty .art .bob{animation:bob 3.2s ease-in-out infinite}
+@keyframes bob{50%{transform:translateY(-3px)}}
+
+/* start-up splash */
+.cell.flash .slot{animation:flash 1.4s ease}
+@keyframes flash{0%,60%{box-shadow:inset 3px 3px 0 rgba(0,0,0,.6),0 0 0 3px var(--accent-2),0 0 26px rgba(236,58,80,.6)}}
+#splash{position:fixed;inset:0;z-index:90;background:var(--deep);display:grid;place-items:center;pointer-events:none;transition:opacity .4s ease}
+#splash.out{opacity:0}
+#splash .in{display:flex;align-items:center;gap:14px;font:800 26px/1 var(--display)}
+#splash .mark{width:36px;height:36px;gap:3px}
+#splash .mark i{animation:tileIn .5s cubic-bezier(.2,1.5,.4,1) both}
+#splash .mark i:nth-child(2){animation-delay:.08s} #splash .mark i:nth-child(3){animation-delay:.16s} #splash .mark i:nth-child(4){animation-delay:.24s}
+#splash .word{animation:rise .5s .3s cubic-bezier(.2,.9,.3,1) both}
+@keyframes tileIn{from{opacity:0;transform:scale(.2) rotate(-20deg)}}
+.brand .mark i{transition:transform .3s cubic-bezier(.3,1.6,.5,1)}
+.brand:hover .mark i:nth-child(1){transform:translate(-1px,-1px)} .brand:hover .mark i:nth-child(4){transform:translate(1px,1px)}
+
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none !important;transition:none !important}}
 </style>
 </head>
 <body>
+<div id="splash" aria-hidden="true"><div class="in"><div class="mark"><i></i><i></i><i></i><i></i></div><span class="word">ModHub</span></div></div>
 <div class="app">
   <aside class="side">
     <div class="brand"><div class="mark"><i></i><i></i><i></i><i></i></div>ModHub</div>
+    <button class="kpill" id="palBtn" title="Search everything (Ctrl+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Search<kbd>Ctrl K</kbd></button>
     <button class="nav on" data-tab="library">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       Library<span class="n" id="navLib"></span></button>
@@ -4373,6 +4486,7 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
     </div>
   </aside>
 
+  <div class="topbar" id="topbar"><span class="tt" id="topTitle"></span><button class="btn sm quiet top-up" id="topUp" title="Back to the top">Back to top</button></div>
   <main>
     <div class="newver hidden" id="newVer" role="status">
       <div class="big" id="newVerNum"></div>
@@ -4500,8 +4614,11 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
         </details>
 
         <div class="progress hidden" id="progress">
+          <div class="live">
+            <div class="ring" id="ring"><svg viewBox="0 0 64 64"><defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec3a50"/><stop offset="1" stop-color="#a81a2d"/></linearGradient></defs><circle class="trk" cx="32" cy="32" r="28"/><circle class="arc" id="ringArc" cx="32" cy="32" r="28"/></svg><span id="ringPct">0%</span></div>
+            <div class="grow"><b id="liveTitle">Installing</b><div class="now" id="now"></div><div class="livelist" id="liveList"></div></div>
+          </div>
           <div class="bar"><div id="barFill"></div></div>
-          <div class="now" id="now"></div>
           <details class="log"><summary>Show details</summary><pre id="log"></pre></details>
         </div>
         <div id="outcome"></div>
@@ -4729,7 +4846,7 @@ function renderInventory() {
     const own = m.source === "local";
     const needs = own && !(m.files || []).length;
     return `
-    <div class="cell ${own ? "own" : ""}" data-k="${esc(m.source)}:${esc(m.id)}" title="${esc(m.name)}${m.desc ? " - " + esc(m.desc) : ""}${own ? " (click to see its files)" : ""}" ${own ? `data-own="${esc(m.id)}"` : ""}>
+    <div class="cell ${own ? "own" : ""}" data-k="${esc(m.source)}:${esc(m.id)}" data-tip="${esc(m.name)}" data-tip-d="${esc(m.desc || "")}" data-tip-h="${own ? "Click to see its files" : ""}" aria-label="${esc(m.name)}" ${own ? `data-own="${esc(m.id)}"` : ""}>
       <div class="slot">
         ${safeUrl(m.icon) ? `<img src="${esc(m.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : `<span class="letter">${esc((m.name || "?")[0])}</span>`}
         ${needs ? `<span class="badge" title="Add its file">File?</span>` : ""}
@@ -5174,6 +5291,7 @@ async function runJob(kind) {
   $("#checkBtn").disabled = $("#installBtn").disabled = true;
   $("#progress").classList.remove("hidden"); $("#log").textContent = ""; $("#barFill").style.width = "0"; $("#outcome").innerHTML = "";
   $("#now").textContent = kind === "install" ? "Starting" : "Checking your mods";
+  liveReset(kind === "install" ? `Installing for Minecraft ${gv}` : `Checking Minecraft ${gv}`);
   try {
     const {job} = await api(kind === "install" ? "/api/install" : "/api/check", body);
     const res = await follow(job, v => {
@@ -5181,9 +5299,12 @@ async function runJob(kind) {
         $("#log").textContent += v.lines.join("\n") + "\n";
         const now = $("#now"); now.classList.add("swap");
         setTimeout(() => { now.textContent = v.lines[v.lines.length - 1].trim(); now.classList.remove("swap"); }, 90);
+        liveLines(v.lines);
       }
       $("#barFill").style.width = (v.progress * 100) + "%";
+      liveProgress(v.progress);
     });
+    await liveDone();
     $("#progress").classList.add("hidden");
     lastRun = {res, gv, kind};
     if (kind === "install") { refreshVersions(); api("/api/state").then(r => { S = r; renderInstances(); renderCatchUp(); renderLoadouts(); }).catch(() => {}); }
@@ -5272,7 +5393,7 @@ async function loadPorts() {
   const missing = [!t.claude && `<a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude Code</a>`, !t.git && `<a href="https://git-scm.com/downloads" target="_blank" rel="noopener">Git</a>`].filter(Boolean);
   $("#toolsWarn").innerHTML = missing.length ? `<div class="banner warn" style="margin:0 0 18px"><div class="grow"><b>Porting needs ${missing.length > 1 ? "two programs" : "one program"}</b><p>Install ${missing.join(" and ")}, then restart ModHub.</p></div></div>` : "";
   if (!portsData.ports.length) {
-    $("#ports").innerHTML = `<div class="empty"><h3>No ports yet</h3><p>When a mod isn't out for your version, choose <b>Port with Claude</b> in the Install results.</p></div>`;
+    $("#ports").innerHTML = `<div class="empty">${emptyArt("anvil")}<h3>No ports yet</h3><p>When a mod isn't out for your version, choose <b>Port with Claude</b> in the Install results.</p></div>`;
     return;
   }
   const openNotes = new Set($$("details.notes[open]").map(d => d.dataset.id));
@@ -5601,7 +5722,7 @@ function renderInstances() {
   $("#navInst").textContent = list.length || "";
   $("#updAll").classList.toggle("hidden", !list.some(r => !r.export));
   if (!list.length) {
-    $("#instList").innerHTML = `<div class="empty"><h3>Nothing installed yet</h3><p>Instances you install from the Install page show up here, so you can update them later with one click.</p></div>`;
+    $("#instList").innerHTML = `<div class="empty">${emptyArt("chest")}<h3>Nothing installed yet</h3><p>Instances you install from the Install page show up here, so you can update them later with one click.</p></div>`;
     return;
   }
   $("#instList").innerHTML = list.map(r => {
@@ -6039,6 +6160,217 @@ $("#quitBtn").onclick = async () => {
   document.body.innerHTML = `<main style="padding:60px"><h1>ModHub has stopped</h1><p class="lede">You can close this tab.</p></main>`;
 };
 
+
+/* ---------- premium pass 2 ---------- */
+// live install view
+let liveBase = "", liveN = 0, ringShown = 0, ringAnim = 0;
+const RING_C = 175.93;
+function liveReset(title) {
+  liveBase = title; liveN = 0; ringShown = 0;
+  $("#liveTitle").textContent = title; $("#liveList").innerHTML = "";
+  $("#ring").classList.remove("done"); $("#ringArc").style.strokeDashoffset = RING_C; $("#ringPct").textContent = "0%";
+}
+function liveProgress(p) {
+  p = Math.max(0, Math.min(1, p || 0));
+  $("#ringArc").style.strokeDashoffset = RING_C * (1 - p);
+  const from = ringShown, to = Math.round(p * 100), t0 = performance.now();
+  cancelAnimationFrame(ringAnim);
+  if (REDUCED) { ringShown = to; $("#ringPct").textContent = to + "%"; return; }
+  (function tick(t) {
+    const k = Math.min(1, (t - t0) / 450), v = Math.round(from + (to - from) * (1 - Math.pow(1 - k, 3)));
+    ringShown = v; $("#ringPct").textContent = v + "%";
+    if (k < 1) ringAnim = requestAnimationFrame(tick);
+  })(t0);
+}
+function liveLines(lines) {
+  const list = $("#liveList");
+  lines.forEach(l => {
+    if (!l.startsWith("  + ")) return;
+    const sp = document.createElement("span"); sp.textContent = l.slice(4).trim();
+    list.append(sp); liveN++;
+  });
+  while (list.children.length > 18) list.firstElementChild.remove();
+  if (liveN) $("#liveTitle").textContent = `${liveBase} (${liveN} added so far)`;
+}
+async function liveDone() {
+  liveProgress(1); $("#ring").classList.add("done");
+  $("#liveTitle").textContent = liveN ? `Done, ${liveN} added` : "Done";
+  if (!REDUCED) await new Promise(r => setTimeout(r, 600));
+}
+
+// a soft ripple where you click a button
+document.addEventListener("pointerdown", e => {
+  const b = e.target.closest(".btn");
+  if (!b || b.disabled || REDUCED) return;
+  const r = b.getBoundingClientRect(), size = Math.max(r.width, r.height) * 2.2;
+  const rp = document.createElement("span");
+  rp.className = "ripple";
+  Object.assign(rp.style, {width: size + "px", height: size + "px", left: (e.clientX - r.left - size / 2) + "px", top: (e.clientY - r.top - size / 2) + "px"});
+  b.appendChild(rp); setTimeout(() => rp.remove(), 650);
+});
+
+// the page title turns into a frosted bar when you scroll
+function checkTopbar() {
+  const sec = $$("main > section").find(x => !x.classList.contains("hidden"));
+  const h1 = sec && sec.querySelector("h1");
+  const show = !!h1 && h1.getBoundingClientRect().bottom < 8;
+  if (show) $("#topTitle").textContent = h1.textContent;
+  $("#topbar").classList.toggle("show", show);
+}
+window.addEventListener("scroll", checkTopbar, {passive: true});
+$("#topUp").onclick = () => window.scrollTo({top: 0, behavior: REDUCED ? "auto" : "smooth"});
+
+// hover labels on library slots
+const tip = document.createElement("div"); tip.id = "tip"; document.body.appendChild(tip);
+let tipTimer, tipFor = null;
+function hideTip() { clearTimeout(tipTimer); tip.classList.remove("on"); tipFor = null; }
+document.addEventListener("pointerover", e => {
+  const el = e.target.closest("[data-tip]");
+  if (el === tipFor) return;
+  hideTip();
+  if (!el) return;
+  tipFor = el;
+  tipTimer = setTimeout(() => {
+    const d = el.dataset.tipD, h = el.dataset.tipH;
+    tip.innerHTML = `<b>${esc(el.dataset.tip)}</b>${d ? esc(d.length > 140 ? d.slice(0, 137) + "..." : d) : ""}${h ? `<em>${esc(h)}</em>` : ""}`;
+    const r = el.getBoundingClientRect(), tr = tip.getBoundingClientRect();
+    let x = r.left + r.width / 2 - tr.width / 2, y = r.top - tr.height - 10;
+    if (y < 8) y = r.bottom + 10;
+    x = Math.max(8, Math.min(innerWidth - tr.width - 8, x));
+    Object.assign(tip.style, {left: x + "px", top: y + "px"});
+    tip.classList.add("on");
+  }, 280);
+});
+["scroll", "pointerdown", "keydown"].forEach(ev => document.addEventListener(ev, hideTip, {passive: true, capture: true}));
+
+// small blocky pictures for empty pages
+function emptyArt(kind) {
+  const ART = {
+    chest: ["................", ".KKKKKKKKKKKKKK.", ".KbbbbbbbbbbbbK.", ".KbBBBBBBBBBBbK.", ".KbBBBBBBBBBBbK.", ".KKKKKKKKKKKKKK.", ".KbbbbbGGbbbbbK.",
+            ".KBBBBBGGBBBBBK.", ".KbBBBBBBBBBBbK.", ".KbBBBBBBBBBBbK.", ".KbBBBBBBBBBBbK.", ".KbbbbbbbbbbbbK.", ".KKKKKKKKKKKKKK.", "................"],
+    anvil: ["................", "................", ".KKKKKKKKKKKKK..", "KAAAAAAAAAAAAAK.", "KAaaaaaaaaaaaAK.", ".KKKKAAAAAKKKK..", "....KAaaaAK.....",
+            "....KAaaaAK.....", "...KKAAAAAKK....", "..KAAAAAAAAAK...", "..KAaaaaaaaaAK..", "..KKKKKKKKKKKK..", "................", "................"],
+  };
+  const C = {K: "#121216", b: "#3b3b44", B: "#2b2b32", G: "#d7263d", A: "#4a4a53", a: "#34343b"};
+  let rects = "";
+  ART[kind].forEach((row, y) => [...row].forEach((ch, x) => { if (C[ch]) rects += `<rect x="${x}" y="${y}" width="1.02" height="1.02" fill="${C[ch]}"/>`; }));
+  const sparks = kind === "anvil" ? `<g class="bob"><rect x="12" y="0" width="1" height="1" fill="#ec3a50"/><rect x="14" y="1" width="1" height="1" fill="#f0a43a"/><rect x="11" y="1" width="1" height="1" fill="#f0a43a" opacity=".6"/></g>` : "";
+  return `<svg class="art" viewBox="0 0 16 14" shape-rendering="crispEdges" aria-hidden="true">${rects}${sparks}</svg>`;
+}
+
+// command palette (Ctrl+K)
+const ICON = {
+  bolt: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>`,
+  search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>`,
+  save: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>`,
+  swap: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 4L3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/></svg>`,
+  file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 3H6v18h12V7l-4-4z"/><path d="M14 3v4h4"/></svg>`,
+};
+const navIcon = t => ($(`.nav[data-tab="${t}"] svg`) || {}).outerHTML || "";
+const after = fn => setTimeout(fn, 260);
+function palItems(q) {
+  const out = [];
+  const add = (g, t, run, o = {}) => out.push({g, t, run, s: o.s || "", ico: o.ico || "", rank: o.rank || 0});
+  [["library", "Library"], ["install", "Install"], ["instances", "Instances"], ["ports", "Ports"], ["settings", "Settings"]]
+    .forEach(([id, n]) => add("Pages", n, () => go(id), {ico: navIcon(id), s: "Page"}));
+  const live = (S.installs || []).filter(r => !r.export);
+  add("Actions", "Install my mods", () => go("install"), {ico: navIcon("install")});
+  if (live.length) add("Actions", "Update all my instances", () => { go("instances"); after(() => $("#updAll").click()); }, {ico: ICON.bolt, s: `${live.length} ${live.length === 1 ? "instance" : "instances"}`});
+  add("Actions", "Import mods from a launcher", () => openImport(), {ico: ICON.plus});
+  add("Actions", "Add files from CurseForge", () => openFiles(), {ico: ICON.file});
+  add("Actions", "New loadout", () => openLoadout(), {ico: ICON.plus});
+  add("Actions", "Save a library backup", () => { go("settings"); after(() => $("#bkSave").click()); }, {ico: ICON.save});
+  add("Actions", "Check for ModHub updates", () => { go("settings"); after(() => $("#updCheck").click()); }, {ico: ICON.search});
+  (S.loadouts || []).filter(l => l.id !== S.active_loadout).forEach(l =>
+    add("Loadouts", `Switch to ${l.name}`, () => switchLoadout(l.id), {ico: ICON.swap, s: `${l.count || 0} items`}));
+  live.forEach(r => add("Instances", `Update ${r.name}`, () => { go("instances"); after(() => { const b = $(`[data-iup="${CSS.escape(r.id)}"]`); if (b) { b.scrollIntoView({block: "center"}); b.click(); } }); },
+    {ico: navIcon("instances"), s: `Minecraft ${r.version}`}));
+  if (q) {
+    S.favorites.forEach(m => add("Your library", m.name, () => {
+      if (m.source === "local") { openItem(m.id); return; }
+      go("library"); setKind(m.kind || "mod");
+      after(() => {
+        const c = $(`.cell[data-k="${CSS.escape(m.source + ":" + m.id)}"]`);
+        if (c) { c.scrollIntoView({block: "center", behavior: REDUCED ? "auto" : "smooth"}); c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash"); }
+      });
+    }, {ico: ico(m, "x").replace(/^<div class="x">|<\/div>$/g, ""), s: KIND_LABEL[m.kind || "mod"]}));
+  }
+  return out;
+}
+function palScore(text, q) {
+  const t = text.toLowerCase();
+  const i = t.indexOf(q);
+  if (i >= 0) return 200 - i - (i > 0 && t[i - 1] !== " " ? 40 : 0);
+  let j = 0;
+  for (const ch of t) if (ch === q[j]) j++;
+  return j === q.length ? 20 : -1;
+}
+function palMark(text, q) {
+  const i = q ? text.toLowerCase().indexOf(q) : -1;
+  return i < 0 ? esc(text) : esc(text.slice(0, i)) + `<mark>${esc(text.slice(i, i + q.length))}</mark>` + esc(text.slice(i + q.length));
+}
+let palSel = 0, palShown = [];
+function palRender() {
+  const q = $("#palQ").value.trim().toLowerCase();
+  let items = palItems(q);
+  if (q) {
+    items = items.map(x => ({...x, rank: palScore(x.t, q)})).filter(x => x.rank >= 0);
+    const order = ["Pages", "Actions", "Loadouts", "Instances", "Your library"];
+    items.sort((a, b) => b.rank - a.rank || order.indexOf(a.g) - order.indexOf(b.g));
+    items = items.slice(0, 12);
+    items.push({g: "Modrinth", t: `Search Modrinth for "${$("#palQ").value.trim()}"`, ico: ICON.search, s: "Library", run: () => { go("library"); $("#q").value = $("#palQ").value.trim(); search(); }});
+  }
+  palShown = items; palSel = Math.min(palSel, items.length - 1);
+  if (!items.length) { $("#palList").innerHTML = `<div class="pal-none">Nothing matches.</div>`; return; }
+  let h = "", g = null;
+  items.forEach((x, i) => {
+    if (!q && x.g !== g) { g = x.g; h += `<div class="pal-g">${esc(g)}</div>`; }
+    h += `<div class="pi ${i === palSel ? "sel" : ""}" data-pi="${i}" role="option"><span class="pico">${x.ico}</span><span class="pt">${palMark(x.t, q)}</span><span class="ps">${esc(x.s)}</span></div>`;
+  });
+  $("#palList").innerHTML = h;
+  const sel = $(".pi.sel"); if (sel) sel.scrollIntoView({block: "nearest"});
+}
+function palRun(i) {
+  const x = palShown[i]; if (!x) return;
+  closePal(); x.run();
+}
+function openPal() {
+  if ($("#pal")) return;
+  hideTip();
+  const d = document.createElement("div");
+  d.className = "pal-scrim"; d.id = "pal";
+  d.innerHTML = `<div class="pal" role="dialog" aria-label="Jump to anything">
+    <div class="pal-q">${ICON.search}<input id="palQ" placeholder="Type a page, a mod, a loadout or an action" autocomplete="off" spellcheck="false"></div>
+    <div class="pal-list" id="palList" role="listbox"></div>
+    <div class="pal-foot"><span><kbd>&uarr;</kbd><kbd>&darr;</kbd>to move</span><span><kbd>Enter</kbd>to open</span><span><kbd>Esc</kbd>to close</span></div></div>`;
+  document.body.appendChild(d);
+  palSel = 0; palRender();
+  const inp = $("#palQ"); inp.focus();
+  inp.oninput = () => { palSel = 0; palRender(); };
+  inp.onkeydown = e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); palSel = (palSel + (e.key === "ArrowDown" ? 1 : -1) + palShown.length) % Math.max(palShown.length, 1); palRender(); }
+    else if (e.key === "Enter") { e.preventDefault(); palRun(palSel); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closePal(); }
+  };
+  d.onclick = e => { const it = e.target.closest("[data-pi]"); if (it) palRun(+it.dataset.pi); else if (!e.target.closest(".pal")) closePal(); };
+  d.onpointermove = e => { const it = e.target.closest("[data-pi]"); if (it && +it.dataset.pi !== palSel) { palSel = +it.dataset.pi; $$(".pi").forEach(x => x.classList.toggle("sel", +x.dataset.pi === palSel)); } };
+}
+function closePal() { const d = $("#pal"); if (d) d.remove(); }
+$("#palBtn").onclick = openPal;
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) { e.preventDefault(); $("#pal") ? closePal() : openPal(); }
+});
+
+// start-up splash
+const splashT0 = performance.now();
+function hideSplash() {
+  const sp = $("#splash"); if (!sp) return;
+  if (REDUCED) { sp.remove(); return; }
+  setTimeout(() => { sp.classList.add("out"); setTimeout(() => sp.remove(), 450); }, Math.max(0, 700 - (performance.now() - splashT0)));
+}
+setTimeout(hideSplash, 4000);
+
 function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
 (async function init() {
@@ -6054,6 +6386,7 @@ function renderAll() { renderCrashes(); renderLoadouts(); renderCatchUp(); rende
   refreshPortCount();
   if (S.favorites.length && last.version) go("install");
   settle(); setTimeout(settle, 300);
+  hideSplash();
 })();
 </script>
 </body>
