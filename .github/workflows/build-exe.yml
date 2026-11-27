@@ -1,7 +1,7 @@
-name: Build ModHub.exe
+name: Build ModHub apps
 
-# Every time a new modhub.py is pushed, GitHub builds ModHub.exe on a Windows computer
-# and puts it on the Releases page. The website's Download button always gets the newest one.
+# Every time a new modhub.py is pushed, GitHub builds ModHub for Windows and Mac
+# and puts them on the Releases page. The website's Download buttons always get the newest ones.
 on:
   push:
     branches: [main]
@@ -12,33 +12,21 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-exe
+  group: build-apps
   cancel-in-progress: false
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install the builder
         run: python -m pip install --upgrade pip pyinstaller pywebview
-
-      - name: Read the version
-        id: ver
-        shell: bash
-        run: |
-          v=$(python -c "import re;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', open('modhub.py', encoding='utf-8').read(), re.M).group(1))")
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Building ModHub $v"
-
       - name: Make the icon and release notes
         run: python exe/prepare.py
-
       - name: Build ModHub.exe
         run: >-
           pyinstaller --noconfirm --clean --onefile --windowed
@@ -46,7 +34,6 @@ jobs:
           --add-data "modhub.py;." --paths .
           --collect-all webview --hidden-import clr
           exe/launcher.py
-
       - name: Check that it starts
         shell: pwsh
         run: |
@@ -66,15 +53,96 @@ jobs:
             exit 1
           }
           Write-Host "ModHub.exe started and answered, as it should."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/ModHub.exe
+            build/notes.md
 
-      - name: Publish it on the Releases page
-        shell: bash
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest       # Apple chips
+            zip: ModHub-mac.zip
+          - runner: macos-15-intel     # older Intel Macs
+            zip: ModHub-mac-intel.zip
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.zip == 'ModHub-mac-intel.zip' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the builder
+        run: python -m pip install --upgrade pip pyinstaller pywebview
+      - name: Make the icon
+        run: python exe/prepare.py
+      - name: Build ModHub.app
+        run: >-
+          pyinstaller --noconfirm --clean --windowed
+          --name ModHub --icon build/modhub.icns
+          --osx-bundle-identifier io.github.modhub-mc
+          --add-data "modhub.py:." --paths .
+          --collect-all webview
+          exe/launcher.py
+      - name: Finish the app
+        run: |
+          v=$(python -c "import re;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', open('modhub.py', encoding='utf-8').read(), re.M).group(1))")
+          plist=dist/ModHub.app/Contents/Info.plist
+          plutil -replace LSUIElement -bool true "$plist"
+          plutil -replace CFBundleShortVersionString -string "$v" "$plist"
+          plutil -replace CFBundleVersion -string "$v" "$plist"
+          codesign --force --deep -s - dist/ModHub.app
+      - name: Check that it starts
+        run: |
+          dist/ModHub.app/Contents/MacOS/ModHub --no-browser --port 47999 &
+          pid=$!
+          code=000
+          for i in $(seq 1 30); do
+            sleep 2
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:47999/ || true)
+            [ "$code" != "000" ] && break
+          done
+          kill $pid 2>/dev/null || true
+          pkill -f ModHub.app 2>/dev/null || true
+          if [ "$code" != "403" ]; then
+            echo "ModHub.app didn't start (got $code). Its log:"
+            cat ~/.modhub/modhub.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "ModHub.app started and answered, as it should."
+      - name: Zip it
+        run: ditto -c -k --keepParent dist/ModHub.app "${{ matrix.zip }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip }}
+          path: ${{ matrix.zip }}
+
+  publish:
+    needs: [windows, mac]
+    if: ${{ !cancelled() && needs.windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Publish on the Releases page
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v${{ steps.ver.outputs.version }}"
+          v=$(python3 -c "import re;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', open('modhub.py', encoding='utf-8').read(), re.M).group(1))")
+          tag="v$v"
+          files="out/windows/dist/ModHub.exe"
+          for z in ModHub-mac.zip ModHub-mac-intel.zip; do
+            [ -f "out/$z/$z" ] && files="$files out/$z/$z"
+          done
+          echo "Publishing $tag: $files"
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" dist/ModHub.exe --clobber
+            gh release upload "$tag" $files --clobber
           else
-            gh release create "$tag" dist/ModHub.exe --title "ModHub ${{ steps.ver.outputs.version }}" --notes-file build/notes.md --latest
+            gh release create "$tag" $files --title "ModHub $v" --notes-file out/windows/build/notes.md --latest
           fi

@@ -53,10 +53,14 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.2"
+APP_VERSION = "3.3"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.3", "notes": [
+        "New: ModHub for Mac. Download it from modhub-mc.github.io, for Macs with Apple chips or older Intel Macs.",
+        "More options under Appearance is tidier: two small panels, Colours and Layout, with shorter labels.",
+    ]},
     {"version": "3.2", "notes": [
         "Appearance is simpler: pick one of nine ready-made themes, or Your colour for any colour you like. Every detailed option is still there under More options.",
         "Discover no longer shows blurry pictures. Mods without screenshots show their icon, sharp and centred.",
@@ -3860,6 +3864,19 @@ def create_shortcuts():
         if r.returncode != 0:
             raise UserError(f"Couldn't create the shortcuts: {(r.stderr or r.stdout).strip()[:300]}")
         return ["your desktop", "the Start menu"]
+    if system == "Darwin" and FROZEN:
+        # ModHub.app itself: copy it into Applications so it opens from Launchpad and Spotlight
+        bundle = Path(sys.executable).resolve().parents[2]
+        if bundle.suffix != ".app":
+            raise UserError("Drag ModHub into your Applications folder to open it from Launchpad.")
+        if bundle.parent in (Path("/Applications"), Path.home() / "Applications"):
+            return ["Applications (it's already there)"]
+        dest = Path.home() / "Applications" / "ModHub.app"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(bundle, dest, symlinks=True)
+        return ["Applications (open it from Launchpad or Spotlight)"]
     if system == "Darwin":
         import shlex
         app = Path.home() / "Applications" / "ModHub.app"
@@ -4092,6 +4109,13 @@ def run_window_helper(url):
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
         except Exception:
             pass
+    if platform.system() == "Darwin" and FROZEN:
+        # ModHub.app runs in the background; only its window gets a Dock icon and menu bar.
+        try:
+            from AppKit import NSApplication
+            NSApplication.sharedApplication().setActivationPolicy_(0)
+        except Exception:
+            traceback.print_exc()
 
     def on_shown(*_):
         try:
@@ -4926,6 +4950,22 @@ details.adv[open] > *:not(summary){margin-top:14px}
 .ap-more .ap-opts{margin-top:16px}
 :root[data-radius="sharp"] .ttile{border-radius:3px}
 :root[data-radius="round"] .ttile{border-radius:22px}
+
+/* tidy More options */
+.ap-more .ap-opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:16px}
+.ap-group{display:grid;gap:14px;align-content:start;padding:16px 18px 18px;border-radius:14px;background:color-mix(in srgb,var(--deep) 55%,transparent);border:1px solid var(--line)}
+.ap-group h4{margin:0 0 2px;font:700 13px/1 var(--body);color:var(--faint);letter-spacing:.2px}
+.ap-group .opt{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:12px}
+.ap-group .opt-l{width:auto;font-size:13px}
+.ap-group .seg{justify-self:start}
+.ap-group .opt .seg button{height:28px;padding:0 10px;font-size:13px}
+.ap-group .range{max-width:none}
+.ap-group .opt.reset{grid-template-columns:1fr;justify-items:end;margin-top:2px}
+.swatches.mini{gap:8px}
+.swatches.mini .sw i{width:24px;height:24px;border-radius:50%}
+.swatches.mini .sw.on i{box-shadow:0 0 0 2px var(--stone-2),0 0 0 4px var(--sw)}
+:root[data-radius="sharp"] .ap-group{border-radius:3px}
+:root[data-radius="round"] .ap-group{border-radius:20px}
 /* ---------- 3.1: backgrounds, customisation, cards ---------- */
 :root{zoom:var(--ui-zoom,1);--gdir:180deg;--gpos:50% -12%}
 :root[data-dir="corner"]{--gdir:150deg;--gpos:0% 0%}
@@ -5214,16 +5254,22 @@ details.card:not([open]){gap:0}
           <details class="ap-more" id="apMore">
             <summary>More options <span>Light or dark, colour, background, corners, size and animations</span></summary>
             <div class="ap-opts">
-              <div class="opt"><span class="opt-l">Mode</span><div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode"><button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio">Match Windows</button></div></div>
-              <div class="opt"><span class="opt-l">Colour</span><div class="swatches" id="accentPick" role="radiogroup" aria-label="Colour theme"></div></div>
-              <div class="opt"><span class="opt-l">Background</span><div class="seg optseg" data-opt="bg" role="radiogroup" aria-label="Background"><button data-v="gradient" role="radio">Gradient</button><button data-v="vivid" role="radio">Vivid</button><button data-v="glow" role="radio">Glow</button><button data-v="plain" role="radio">Plain</button></div></div>
-              <div class="opt" data-needs-bg><span class="opt-l">Direction</span><div class="seg optseg" data-opt="dir" role="radiogroup" aria-label="Gradient direction"><button data-v="top" role="radio">From the top</button><button data-v="corner" role="radio">From a corner</button><button data-v="side" role="radio">From the side</button><button data-v="bottom" role="radio">From the bottom</button></div></div>
-              <div class="opt" data-needs-bg><span class="opt-l">Strength</span><div class="range"><input type="range" id="bgStrength" min="10" max="100" step="1" aria-label="Background strength"><span id="bgStrengthVal"></span></div></div>
-              <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
-              <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
-              <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio">Small</button><button data-v="100" role="radio">Normal</button><button data-v="110" role="radio">Large</button><button data-v="120" role="radio">Larger</button></div></div>
-              <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
-              <div class="opt"><span class="opt-l"></span><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
+              <div class="ap-group">
+                <h4>Colours</h4>
+                <div class="opt"><span class="opt-l">Mode</span><div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode"><button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio" title="Match Windows">Auto</button></div></div>
+                <div class="opt"><span class="opt-l">Colour</span><div class="swatches mini" id="accentPick" role="radiogroup" aria-label="Colour"></div></div>
+                <div class="opt"><span class="opt-l">Background</span><div class="seg optseg" data-opt="bg" role="radiogroup" aria-label="Background"><button data-v="gradient" role="radio">Gradient</button><button data-v="vivid" role="radio">Vivid</button><button data-v="glow" role="radio">Glow</button><button data-v="plain" role="radio">Plain</button></div></div>
+                <div class="opt" data-needs-bg><span class="opt-l">Starts from</span><div class="seg optseg" data-opt="dir" role="radiogroup" aria-label="Where the gradient starts"><button data-v="top" role="radio">Top</button><button data-v="corner" role="radio">Corner</button><button data-v="side" role="radio">Side</button><button data-v="bottom" role="radio">Bottom</button></div></div>
+                <div class="opt" data-needs-bg><span class="opt-l">Strength</span><div class="range"><input type="range" id="bgStrength" min="10" max="100" step="1" aria-label="Background strength"><span id="bgStrengthVal"></span></div></div>
+              </div>
+              <div class="ap-group">
+                <h4>Layout</h4>
+                <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
+                <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
+                <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio" title="Small">S</button><button data-v="100" role="radio" title="Normal">M</button><button data-v="110" role="radio" title="Large">L</button><button data-v="120" role="radio" title="Larger">XL</button></div></div>
+                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+                <div class="opt reset"><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
+              </div>
             </div>
           </details>
         </section>
@@ -6741,7 +6787,7 @@ function shortcutWhere() {
 }
 function renderAppBits() {
   $("#shortcutText").textContent = `Add ModHub to ${shortcutWhere()}, so it opens in its own window without running the script.`;
-  $("#shortcutHelp").textContent = `Adds ModHub to ${shortcutWhere()}. If you move ${S.frozen ? "ModHub.exe" : "modhub.py"}, add the shortcut again.`;
+  $("#shortcutHelp").textContent = `Adds ModHub to ${shortcutWhere()}. If you move ${S.frozen ? (/Mac/.test(navigator.userAgent) ? "ModHub" : "ModHub.exe") : "modhub.py"}, add the shortcut again.`;
   $("#shortcutBanner").classList.toggle("hidden", !!S.shortcut_done || !S.favorites.length);
   renderWindowBits();
   $("#quitHelp").textContent = S.in_window ? "Closing the ModHub window also stops it." : "ModHub keeps running in the background until you stop it.";
@@ -7167,8 +7213,8 @@ function renderTheme() {
   const t = {...THEME_DEFAULT, ...(S.theme || {})};
   $$("#themeMode button").forEach(b => { b.classList.toggle("on", b.dataset.mode === t.mode); b.setAttribute("aria-checked", b.dataset.mode === t.mode); });
   $$("[data-opt]").forEach(g => g.querySelectorAll("button").forEach(b => { const on = String(t[g.dataset.opt]) === b.dataset.v; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); }));
-  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}"><i></i>${n}</button>`).join("")
-    + `<label class="sw custom ${t.accent === "custom" ? "on" : ""}" style="--sw:${t.custom}" title="Pick any colour"><i></i>Custom<input type="color" id="customColor" value="${t.custom}" aria-label="Custom colour"></label>`;
+  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}" aria-label="${n}"><i></i></button>`).join("")
+    + `<label class="sw custom ${t.accent === "custom" ? "on" : ""}" style="--sw:${t.custom}" title="Pick any colour"><i></i><input type="color" id="customColor" value="${t.custom}" aria-label="Pick any colour"></label>`;
   $$("#accentPick [data-accent]").forEach(b => b.onclick = () => setTheme({accent: b.dataset.accent}));
   const cc = $("#customColor");
   cc.oninput = () => { const v = cc.value; cc.parentElement.style.setProperty("--sw", v); S.theme = {...t, accent: "custom", custom: v}; applyTheme(S.theme); $$("#accentPick .sw").forEach(x => x.classList.toggle("on", x.classList.contains("custom"))); };
