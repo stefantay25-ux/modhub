@@ -53,10 +53,14 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.5", "notes": [
+        "On Windows, the Python version of ModHub now turns itself into the ModHub app by itself, so it always gets its own window instead of an Edge or Chrome one.",
+        "Your desktop and Start menu shortcuts then open the app, and so does modhub.py.",
+    ]},
     {"version": "3.4", "notes": [
         "New: How to use. Click it at the bottom of the sidebar for a quick four-step guide, with a button to jump to each page.",
     ]},
@@ -3118,7 +3122,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "theme": theme_of(cfg), "frozen": FROZEN,
+            "theme": theme_of(cfg), "frozen": FROZEN, "app_switch": app_switch_state(),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -3282,6 +3286,11 @@ def api(path, body):
             if src.is_file() and src.suffix.lower() in (".jar", ".zip"):  # mods, resource packs, shaders
                 added.append(add_local_file(src, src.name, body.get("version") or None)["item"]["name"])
         return {"added": added, "favorites": CFG["favorites"]}
+    if path == "/api/app_switch":
+        if body.get("start"):
+            threading.Thread(target=switch_to_app, kwargs={"manual": True}, daemon=True).start()
+            time.sleep(0.2)
+        return app_switch_state()
     if path == "/api/theme":
         with CFG_LOCK:
             if body.get("reset"):
@@ -3844,6 +3853,104 @@ def write_icons():
     return d
 
 
+def windows_shortcuts(env):
+    """ModHub.lnk on the desktop and in the Start menu, from MH_TARGET / MH_ARGS / MH_DIR / MH_ICON in env."""
+    ps = ("$ws = New-Object -ComObject WScript.Shell; "
+          "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
+          "$s = $ws.CreateShortcut((Join-Path $d 'ModHub.lnk')); $s.TargetPath = $env:MH_TARGET; "
+          "$s.Arguments = $env:MH_ARGS; $s.WorkingDirectory = $env:MH_DIR; $s.IconLocation = $env:MH_ICON; "
+          "$s.Description = 'Install your Minecraft mods into any version'; $s.Save() }")
+    r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                       env=env, capture_output=True, text=True, creationflags=0x08000000)
+    if r.returncode != 0:
+        raise UserError(f"Couldn't create the shortcuts: {(r.stderr or r.stdout).strip()[:300]}")
+
+
+# ---- the Python version turns itself into the ModHub app (ModHub.exe) ----
+# The .exe brings its own Python and window engine, so its window opens on any Windows PC.
+APP_SWITCH = {"status": None, "message": ""}  # None, downloading, ready (waiting for installs), switching, error
+
+
+def app_exe_url():
+    m = re.fullmatch(r"([\w.-]+)/([\w.-]+)", current_update_source())
+    return f"https://github.com/{m.group(1)}/{m.group(2)}/releases/latest/download/ModHub.exe" if m else None
+
+
+def app_switch_cfg():
+    with CFG_LOCK:
+        return dict(CFG.get("app_switch") or {})
+
+
+def can_switch_to_app():
+    return (platform.system() == "Windows" and not FROZEN and bool(app_exe_url())
+            and "--no-app" not in sys.argv and "--no-browser" not in sys.argv)
+
+
+def app_switch_state():
+    info = app_switch_cfg()
+    return {"available": can_switch_to_app(), "status": APP_SWITCH["status"], "message": APP_SWITCH["message"],
+            "gave_up": info.get("attempts", 0) >= 3 and not info.get("ok")}
+
+
+def switch_to_app(manual=False):
+    """Download ModHub.exe, point the shortcuts at it, then reopen ModHub as the app."""
+    info = app_switch_cfg()
+    if APP_SWITCH["status"] in ("downloading", "ready", "switching") or (info.get("attempts", 0) >= 3 and not manual):
+        return
+    APP_SWITCH.update(status="downloading", message="")
+    with CFG_LOCK:
+        CFG["app_switch"] = {**info, "attempts": 0 if manual else info.get("attempts", 0) + 1}
+        save_config(CFG)
+    try:
+        folder = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Programs" / "ModHub"
+        folder.mkdir(parents=True, exist_ok=True)
+        exe, tmp = folder / "ModHub.exe", folder / "ModHub.exe.download"
+        req = urllib.request.Request(app_exe_url(), headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=300) as r, open(tmp, "wb") as out:
+            shutil.copyfileobj(r, out, 1 << 16)
+        with open(tmp, "rb") as f:
+            head = f.read(2)
+        if head != b"MZ" or tmp.stat().st_size < 3_000_000:
+            tmp.unlink()
+            raise UserError("the download wasn't a working ModHub.exe")
+        os.replace(tmp, exe)
+        try:
+            windows_shortcuts({**os.environ, "MH_TARGET": str(exe), "MH_ARGS": "", "MH_DIR": str(folder), "MH_ICON": str(exe)})
+        except Exception:
+            traceback.print_exc()  # the app still works; the old shortcut just keeps opening it via modhub.py
+        with CFG_LOCK:
+            CFG["app_switch"] = {**CFG.get("app_switch", {}), "path": str(exe)}
+            save_config(CFG)
+    except (urllib.error.URLError, TimeoutError, OSError, UserError) as e:
+        traceback.print_exc()
+        msg = str(e) if isinstance(e, UserError) else "couldn't download it. Check your internet"
+        APP_SWITCH.update(status="error", message=msg)
+        return
+    APP_SWITCH.update(status="ready")
+    while any(not j.done for j in list(JOBS.values())):  # never interrupt an install
+        time.sleep(2)
+    APP_SWITCH.update(status="switching")
+    time.sleep(3)  # the page shows "Switching to the ModHub app"
+    print("Reopening as the ModHub app")
+    subprocess.Popen([str(exe), "--after-restart", str(os.getpid())], close_fds=True, **detached_kwargs())
+    threading.Timer(0.4, shutdown).start()
+
+
+def open_app_instead():
+    """Once the app is set up, starting modhub.py just opens the app."""
+    if not can_switch_to_app() or "--after-restart" in sys.argv:
+        return False
+    info = app_switch_cfg()
+    exe = Path(info.get("path") or "")
+    if not info.get("ok") or not exe.is_file():
+        return False
+    try:
+        subprocess.Popen([str(exe)], close_fds=True, **detached_kwargs())
+        return True
+    except OSError:
+        return False
+
+
 def create_shortcuts():
     """Add ModHub to the desktop / Start menu / Applications so it opens like any app."""
     script = Path(__file__).resolve()
@@ -3857,15 +3964,7 @@ def create_shortcuts():
         else:
             env = {**os.environ, "MH_TARGET": str(pyw if pyw.exists() else exe), "MH_ARGS": f'"{script}"',
                    "MH_DIR": str(script.parent), "MH_ICON": str(icons / "modhub.ico")}
-        ps = ("$ws = New-Object -ComObject WScript.Shell; "
-              "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
-              "$s = $ws.CreateShortcut((Join-Path $d 'ModHub.lnk')); $s.TargetPath = $env:MH_TARGET; "
-              "$s.Arguments = $env:MH_ARGS; $s.WorkingDirectory = $env:MH_DIR; $s.IconLocation = $env:MH_ICON; "
-              "$s.Description = 'Install your Minecraft mods into any version'; $s.Save() }")
-        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-                           env=env, capture_output=True, text=True, creationflags=0x08000000)
-        if r.returncode != 0:
-            raise UserError(f"Couldn't create the shortcuts: {(r.stderr or r.stdout).strip()[:300]}")
+        windows_shortcuts(env)
         return ["your desktop", "the Start menu"]
     if system == "Darwin" and FROZEN:
         # ModHub.app itself: copy it into Applications so it opens from Launchpad and Spotlight
@@ -4153,6 +4252,8 @@ def main():
         return
     relaunch_without_console()
     wait_for_previous()
+    if open_app_instead():
+        return  # ModHub.exe is set up on this PC, so open that
     if apply_staged_update_on_start():
         return  # the updated ModHub is starting
 
@@ -4188,6 +4289,14 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     RUNNING_FILE.write_text(json.dumps({"port": port, "token": TOKEN, "pid": os.getpid()}), "utf-8")
     print(f"ModHub {APP_VERSION} is running at {url}")
+    if FROZEN and platform.system() == "Windows":  # the app started fine: modhub.py can hand over to it from now on
+        with CFG_LOCK:
+            sw = CFG.get("app_switch") or {}
+            if not sw.get("ok") or os.path.normcase(sw.get("path", "")) != os.path.normcase(sys.executable):
+                CFG["app_switch"] = {"path": sys.executable, "ok": True}
+                save_config(CFG)
+    elif can_switch_to_app() and not app_switch_cfg().get("ok"):
+        threading.Thread(target=lambda: (time.sleep(6), switch_to_app()), daemon=True).start()
 
     def open_ui():
         if "--no-browser" in sys.argv:
@@ -4970,6 +5079,9 @@ details.adv[open] > *:not(summary){margin-top:14px}
 :root[data-radius="sharp"] .ap-group{border-radius:3px}
 :root[data-radius="round"] .ap-group{border-radius:20px}
 
+.switch-cover{position:fixed;inset:0;z-index:95;display:grid;place-items:center;text-align:center;background:var(--stone);animation:fadeIn .3s ease}
+.switch-cover .mark{width:40px;height:40px;gap:3px;margin:0 auto 22px}
+.switch-cover .lede{margin:0 auto}
 /* how to use */
 .help-btn{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;border-radius:8px;background:none;color:var(--muted);font-weight:600;font-size:13.5px;cursor:pointer;text-align:left}
 .help-btn svg{width:17px;height:17px;flex:none}
@@ -6085,7 +6197,44 @@ async function loadPorts() {
 
 /* ---------- own window (pywebview) ---------- */
 let nativeState = "idle"; // idle | working | ready | failed
+let appSwitchPoll = null;
+function watchAppSwitch() {
+  const sw = S.app_switch;
+  if (!sw || !sw.available || sw.status === "error" || sw.gave_up || appSwitchPoll) return;
+  appSwitchPoll = setInterval(async () => {
+    try { S.app_switch = await api("/api/app_switch"); } catch (e) { return; }
+    const st = S.app_switch.status;
+    if (st === "switching") {
+      clearInterval(appSwitchPoll);
+      const cover = document.createElement("div"); cover.className = "switch-cover";
+      cover.innerHTML = `<div><div class="mark"><i></i><i></i><i></i><i></i></div><h1>Switching to the ModHub app</h1><p class="lede">ModHub is reopening as its own app, with its own window. You can close this one.</p></div>`;
+      document.body.appendChild(cover);
+      setTimeout(() => window.close(), 2500);
+      return;
+    }
+    if (st === "error") { clearInterval(appSwitchPoll); appSwitchPoll = null; }
+    renderWindowBits();
+  }, 2000);
+}
 function renderWindowBits() {
+  const sw = S.app_switch;
+  if (sw && sw.available && !S.native) {
+    $("#nativeBanner").classList.add("hidden");
+    const failed = sw.status === "error" || sw.gave_up;
+    $("#windowMode").innerHTML = failed
+      ? `Couldn't set up the ModHub app${sw.message ? `: ${esc(sw.message)}` : ""}. ModHub keeps using an Edge or Chrome window for now.`
+      : sw.status === "ready"
+        ? "The ModHub app is ready. ModHub reopens as the app as soon as your install finishes."
+        : `<span class="spin"></span>&nbsp; ModHub is setting itself up as an app, with its own window. It reopens by itself in a moment.`;
+    $("#windowActions").innerHTML = failed ? `<button class="btn" id="appSwitchRetry">Try again</button>` : "";
+    if (failed) $("#appSwitchRetry").onclick = async e => {
+      e.target.disabled = true; e.target.textContent = "Setting up...";
+      try { S.app_switch = await api("/api/app_switch", {start: true}); } catch (err) { toast(err.message); }
+      appSwitchPoll = null; renderWindowBits(); watchAppSwitch();
+    };
+    watchAppSwitch();
+    return;
+  }
   if (S.native_broken && !S.native) {
     $("#nativeBanner").classList.toggle("hidden", !!S.native_prompt_dismissed);
     $("#nativeBanner b").textContent = "ModHub's own window didn't open";
