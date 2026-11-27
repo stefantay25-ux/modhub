@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
 MODRINTH = "https://api.modrinth.com/v2"
 LOADERS = ("fabric", "quilt", "forge", "neoforge")
@@ -303,9 +303,12 @@ def mr_fav(p):
             "url": f"https://modrinth.com/{p.get('project_type', 'mod')}/{p.get('slug') or p['id']}"}
 
 
-def mr_latest_for(project_id, loaders, gv):
+def mr_latest_for(project_id, loaders, gv, since=None):
+    """Newest stable build for this version. `since` (a date) keeps a version ModHub chose to fix a clash."""
     versions = http_json("GET", f"{MODRINTH}/project/{project_id}/version?" +
                          q({"loaders": json.dumps(loaders), "game_versions": json.dumps([gv])})) or []
+    if since:
+        versions = [v for v in versions if v.get("date_published", "") >= since] or versions
     if not versions:
         return None
     versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
@@ -417,6 +420,8 @@ def start_job(fn, *args):
 def resolve(job, favorites, gv, loader, ports=None):
     """Work out what to install for this version: mods, resource packs and your own files."""
     loaders = search_loaders(loader)
+    with CFG_LOCK:
+        pins = dict(CFG.get("pins") or {})
     items, order = {}, []
 
     def add(fav, dep_of=None):
@@ -480,7 +485,7 @@ def resolve(job, favorites, gv, loader, ports=None):
                 it["status"] = "not_ready"
                 continue
         else:
-            v = mr_latest_for(it["id"], loaders, gv)
+            v = mr_latest_for(it["id"], loaders, gv, since=(pins or {}).get(f"{it['id']}|{gv}|{loader}"))
             if not v:
                 it["status"] = "not_ready"
                 continue
@@ -645,6 +650,381 @@ def install_mods(job, mods_dir: Path, items, managed=True):
         pman, ppath, _ = _place(job, mods_dir.parent / folder, these, managed, (0.8, 0.92))
         if managed:
             ppath.write_text(json.dumps(pman, indent=2), "utf-8")
+
+
+# =========================================================================== #
+# Checking that mods work together (the same rules Fabric/Forge use when the game starts)
+# =========================================================================== #
+LOADER_IDS = {"minecraft", "java", "fabricloader", "fabric-loader", "quilt_loader", "quilted_fabric_api_base",
+              "forge", "neoforge", "javafml", "lowcodefml", "mixinextras_compat"}
+
+
+def _vkey(v):
+    """A sortable key for versions like 1.12.0+mc26.3, 0.9.3-beta.2, 26.3."""
+    v = str(v or "").strip().lstrip("vV")
+    v = v.split("+", 1)[0]
+    core, _, pre = v.partition("-")
+    nums = []
+    for part in re.split(r"[.]", core):
+        m = re.match(r"(\d+)", part)
+        nums.append(int(m.group(1)) if m else 0)
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    # a pre-release (1.2.0-beta) sorts before the release (1.2.0)
+    return (tuple(nums), 0 if pre else 1, tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", pre)) if pre else ())
+
+
+def _cmp(a, b):
+    ka, kb = _vkey(a), _vkey(b)
+    na, nb = list(ka[0]), list(kb[0])
+    n = max(len(na), len(nb))
+    na += [0] * (n - len(na)); nb += [0] * (n - len(nb))
+    ka, kb = (tuple(na),) + ka[1:], (tuple(nb),) + kb[1:]
+    return (ka > kb) - (ka < kb)
+
+
+def _fabric_single(version, c):
+    c = c.strip()
+    if c in ("", "*"):
+        return True
+    for op in (">=", "<=", ">", "<", "="):
+        if c.startswith(op):
+            r = _cmp(version, c[len(op):])
+            return {">=": r >= 0, "<=": r <= 0, ">": r > 0, "<": r < 0, "=": r == 0}[op]
+    if c[0] in "~^":
+        base = c[1:]
+        parts = [int(x) if x.isdigit() else 0 for x in re.findall(r"\d+", base.split("+")[0])] or [0]
+        if c[0] == "~":
+            upper = parts[:2] if len(parts) > 1 else [parts[0] + 1]
+            if len(upper) == 2:
+                upper[1] += 1
+        else:
+            upper = [parts[0] + 1]
+        return _cmp(version, base) >= 0 and _cmp(version, ".".join(map(str, upper))) < 0
+    if re.search(r"(^|\.)[xX*]($|\.)", c):
+        pre = [x for x in c.split(".") if x not in ("x", "X", "*")]
+        got = re.findall(r"\d+", str(version).split("+")[0])
+        return got[:len(pre)] == pre
+    return _cmp(version, c) == 0
+
+
+def fabric_satisfies(version, pred):
+    """Fabric/Quilt version rules: a list means any of them; spaces inside one mean all of them."""
+    if pred is None:
+        return True
+    preds = pred if isinstance(pred, list) else [pred]
+    for p_ in preds:
+        if isinstance(p_, dict):  # quilt {"versions": ...}
+            p_ = p_.get("versions", "*")
+        if isinstance(p_, list):
+            if fabric_satisfies(version, p_):
+                return True
+            continue
+        if all(_fabric_single(version, part) for part in str(p_).split()):
+            return True
+    return False
+
+
+def maven_satisfies(version, rng):
+    """Forge/NeoForge versionRange like [1.20,1.21) or [0.5.1,)."""
+    rng = (rng or "").strip()
+    if not rng or rng == "*":
+        return True
+    for m in re.finditer(r"([\[(])\s*([^,\])]*)\s*(?:,\s*([^\])]*))?\s*([\])])", rng):
+        lo_inc, lo, hi, hi_inc = m.group(1) == "[", m.group(2).strip(), m.group(3), m.group(4) == "]"
+        if hi is None:  # [1.2] means exactly 1.2
+            if _cmp(version, lo) == 0:
+                return True
+            continue
+        hi = hi.strip()
+        ok = (not lo or (_cmp(version, lo) >= 0 if lo_inc else _cmp(version, lo) > 0)) and \
+             (not hi or (_cmp(version, hi) <= 0 if hi_inc else _cmp(version, hi) < 0))
+        if ok:
+            return True
+    if not re.search(r"[\[(]", rng):  # a bare version means "this or newer" for Forge
+        return _cmp(version, rng) >= 0
+    return False
+
+
+def _read_meta_from_zip(z, out, nested=True, depth=0):
+    names = set(z.namelist())
+    if "fabric.mod.json" in names:
+        try:
+            m = json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"), strict=False)
+            mid, ver = m.get("id"), str(m.get("version", ""))
+            if mid:
+                out["ids"].setdefault(mid, ver)
+                for pv in m.get("provides") or []:
+                    out["ids"].setdefault(pv, ver)
+                if depth == 0:
+                    out.update(main=mid, name=m.get("name") or mid, version=ver)
+                    for dep, pred in (m.get("depends") or {}).items():
+                        out["deps"].append({"on": dep, "pred": pred, "style": "fabric", "type": "requires"})
+                    for dep, pred in (m.get("breaks") or {}).items():
+                        out["deps"].append({"on": dep, "pred": pred, "style": "fabric", "type": "breaks"})
+        except Exception:
+            pass
+    if "quilt.mod.json" in names:
+        try:
+            ql = json.loads(z.read("quilt.mod.json").decode("utf-8", "replace")).get("quilt_loader", {})
+            mid, ver = ql.get("id"), str(ql.get("version", ""))
+            if mid:
+                out["ids"].setdefault(mid, ver)
+                for pv in ql.get("provides") or []:
+                    out["ids"].setdefault(pv if isinstance(pv, str) else pv.get("id"), ver)
+                if depth == 0 and not out.get("main"):
+                    out.update(main=mid, name=(ql.get("metadata") or {}).get("name") or mid, version=ver)
+                    for d in ql.get("depends") or []:
+                        if isinstance(d, str):
+                            out["deps"].append({"on": d, "pred": "*", "style": "fabric", "type": "requires"})
+                        elif isinstance(d, dict) and not d.get("optional"):
+                            out["deps"].append({"on": d.get("id"), "pred": d.get("versions", "*"), "style": "fabric", "type": "requires"})
+                    for d in ql.get("breaks") or []:
+                        if isinstance(d, dict):
+                            out["deps"].append({"on": d.get("id"), "pred": d.get("versions", "*"), "style": "fabric", "type": "breaks"})
+        except Exception:
+            pass
+    for toml in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
+        if toml not in names:
+            continue
+        text = z.read(toml).decode("utf-8", "replace")
+        jar_ver = ""
+        if "META-INF/MANIFEST.MF" in names:
+            mm = re.search(r"^Implementation-Version:\s*(\S+)", z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace"), re.M)
+            jar_ver = mm.group(1) if mm else ""
+        mods = re.split(r"^\s*\[\[mods\]\]\s*$", text, flags=re.M)[1:]
+        for i, block in enumerate(mods):
+            mid = re.search(r'^\s*modId\s*=\s*"([^"]+)"', block, re.M)
+            ver = re.search(r'^\s*version\s*=\s*"([^"]+)"', block, re.M)
+            if not mid:
+                continue
+            v = ver.group(1) if ver else ""
+            if "${" in v:
+                v = jar_ver
+            out["ids"].setdefault(mid.group(1), v)
+            if depth == 0 and i == 0 and not out.get("main"):
+                dn = re.search(r'^\s*displayName\s*=\s*"([^"]+)"', block, re.M)
+                out.update(main=mid.group(1), name=dn.group(1) if dn else mid.group(1), version=v)
+        if depth == 0:
+            for blk in re.split(r"^\s*\[\[dependencies\.[^\]]+\]\]\s*$", text, flags=re.M)[1:]:
+                dep = re.search(r'^\s*modId\s*=\s*"([^"]+)"', blk, re.M)
+                rng = re.search(r'^\s*versionRange\s*=\s*"([^"]*)"', blk, re.M)
+                typ = re.search(r'^\s*type\s*=\s*"([^"]+)"', blk, re.M)
+                mand = re.search(r'^\s*mandatory\s*=\s*(true|false)', blk, re.M)
+                if not dep:
+                    continue
+                t = (typ.group(1).lower() if typ else ("required" if not mand or mand.group(1) == "true" else "optional"))
+                if t in ("required", "incompatible"):
+                    out["deps"].append({"on": dep.group(1), "pred": rng.group(1) if rng else "", "style": "maven",
+                                        "type": "requires" if t == "required" else "breaks"})
+        break
+    if nested and depth < 2:  # mods bundled inside mods (jar-in-jar)
+        for n in names:
+            if (n.startswith("META-INF/jars/") or n.startswith("META-INF/jarjar/")) and n.endswith(".jar"):
+                try:
+                    import io
+                    with zipfile.ZipFile(io.BytesIO(z.read(n))) as inner:
+                        _read_meta_from_zip(inner, out, nested=True, depth=depth + 1)
+                except Exception:
+                    pass
+
+
+def jar_meta(path: Path):
+    out = {"file": path.name, "ids": {}, "deps": [], "main": None, "name": path.stem, "version": ""}
+    try:
+        with zipfile.ZipFile(path) as z:
+            _read_meta_from_zip(z, out)
+    except Exception:
+        pass
+    return out
+
+
+def _wanted_text(pred, style, breaks=False):
+    """Turn a version rule into words: '1.12.0 or newer', 'newer than 1.12.0'..."""
+    if style == "maven":
+        m = re.fullmatch(r"\[\s*([^,\]]+)\s*,\s*\)", (pred or "").strip())
+        if m:
+            return f"{m.group(1)} or newer"
+        return f"version {pred}" if pred else "any version"
+    p_ = pred if isinstance(pred, str) else " or ".join(map(str, pred)) if isinstance(pred, list) else str(pred)
+    p_ = p_.strip()
+    if breaks:
+        m = re.fullmatch(r"<=\s*(\S+)", p_)
+        if m:
+            return f"newer than {m.group(1)}"
+        m = re.fullmatch(r"<\s*(\S+)", p_)
+        if m:
+            return f"{m.group(1)} or newer"
+        return f"a version that isn't {p_}"
+    for pat, fmt in ((r">=\s*(\S+)", "{} or newer"), (r">\s*(\S+)", "newer than {}"), (r"<=\s*(\S+)", "{} or older"),
+                     (r"<\s*(\S+)", "older than {}"), (r"[~^]\s*(\S+)", "{} or a close newer version")):
+        m = re.fullmatch(pat, p_)
+        if m:
+            return fmt.format(m.group(1))
+    return "any version" if p_ in ("*", "") else f"version {p_}"
+
+
+def _mc_from(pred):
+    found = re.findall(r"\d+(?:\.\d+)+", json.dumps(pred))
+    return found[0] if found else "another version"
+
+
+def _show(v):
+    return str(v or "").split("+", 1)[0] or "an unknown version"
+
+
+def check_mods(folder: Path, gv=None):
+    """Find mods that are missing something, too old/new for each other, or made for another Minecraft."""
+    jars = sorted(f for f in folder.glob("*.jar")) if folder.is_dir() else []
+    metas = [jar_meta(j) for j in jars]
+    have = {}
+    for m in metas:
+        for mid, ver in m["ids"].items():
+            have.setdefault(mid, (ver, m))
+    problems = []
+    for m in metas:
+        if not m["main"]:
+            continue
+        for d in m["deps"]:
+            dep = d["on"]
+            sat = fabric_satisfies if d["style"] == "fabric" else maven_satisfies
+            if dep == "minecraft":
+                if gv and d["type"] == "requires" and d["pred"] and not sat(gv, d["pred"]):
+                    problems.append({"type": "minecraft", "file": m["file"], "mod": m["name"], "mod_id": m["main"],
+                                     "want": d["pred"], "style": d["style"],
+                                     "message": f"{m['name']} is made for Minecraft {_mc_from(d['pred'])}, not {gv}."})
+                continue
+            if dep in LOADER_IDS or dep == m["main"]:
+                continue
+            got = have.get(dep)
+            if d["type"] == "requires":
+                if not got:
+                    problems.append({"type": "missing", "file": m["file"], "mod": m["name"], "mod_id": m["main"],
+                                     "on": dep, "want": d["pred"], "style": d["style"],
+                                     "message": f"{m['name']} needs {dep}, which isn't installed."})
+                elif not sat(got[0], d["pred"]):
+                    problems.append({"type": "needs_version", "file": m["file"], "mod": m["name"], "mod_id": m["main"],
+                                     "on": dep, "on_name": got[1]["name"], "on_file": got[1]["file"], "have": got[0],
+                                     "want": d["pred"], "style": d["style"],
+                                     "message": f"{m['name']} needs {got[1]['name']} {_wanted_text(d['pred'], d['style'])}, but {_show(got[0])} is installed."})
+            elif got and d["pred"] and (sat(got[0], d["pred"]) if d["style"] == "fabric" else maven_satisfies(got[0], d["pred"])):
+                problems.append({"type": "conflict", "file": m["file"], "mod": m["name"], "mod_id": m["main"],
+                                 "on": dep, "on_name": got[1]["name"], "on_file": got[1]["file"], "have": got[0],
+                                 "want": d["pred"], "style": d["style"],
+                                 "message": f"{m['name']} doesn't work with {got[1]['name']} {_show(got[0])}. It needs {got[1]['name']} {_wanted_text(d['pred'], d['style'], breaks=True)}."})
+    return problems
+
+
+def _ok_for(problem, version):
+    """Would this version of the other mod solve the problem?"""
+    sat = fabric_satisfies if problem["style"] == "fabric" else maven_satisfies
+    if problem["type"] == "needs_version":
+        return sat(version, problem["want"])
+    if problem["type"] == "conflict":
+        return not sat(version, problem["want"])
+    return True
+
+
+def fix_problems(job, folder: Path, problems, gv, loader, managed=True):
+    """Fix what can be fixed safely: get a version of the other mod that fits, or add what's missing."""
+    if not problems:
+        return problems
+    mpath = folder / MANIFEST_NAME
+    try:
+        manifest = json.loads(mpath.read_text("utf-8"))
+    except Exception:
+        manifest = {}
+    by_file = {v: k for k, v in manifest.items()}
+    loaders = search_loaders(loader)
+    tmpdir = Path(tempfile.mkdtemp(prefix="modhub-fix-"))
+    try:
+        for pr in problems:
+            pr.setdefault("status", "open")
+            if pr["type"] in ("needs_version", "conflict"):
+                key = by_file.get(pr["on_file"])
+                pid = key.split(":", 1)[1] if key and key.startswith("modrinth:") else None
+                if not pid:
+                    try:  # not installed by ModHub: look it up by its mod id
+                        proj = http_json("GET", f"{MODRINTH}/project/{urllib.parse.quote(pr['on'])}")
+                        pid = proj and proj.get("id")
+                    except Exception:
+                        pid = None
+                if not pid:
+                    continue
+                job.log(f"Looking for a {pr['on_name']} that works with {pr['mod']}...")
+                try:
+                    versions = http_json("GET", f"{MODRINTH}/project/{pid}/version?" +
+                                         q({"loaders": json.dumps(loaders), "game_versions": json.dumps([gv])})) or []
+                except Exception:
+                    versions = []
+                versions.sort(key=lambda v: v.get("date_published", ""), reverse=True)
+                for v in versions[:6]:
+                    f = mr_primary_file(v)
+                    if not f:
+                        continue
+                    cand = tmpdir / f["filename"]
+                    try:
+                        download(f["url"], cand, (f.get("hashes") or {}).get("sha1"))
+                    except Exception:
+                        continue
+                    cver = jar_meta(cand)["ids"].get(pr["on"], v.get("version_number", ""))
+                    if _ok_for(pr, cver):
+                        old = folder / pr["on_file"]
+                        if old.exists():
+                            old.unlink()
+                        shutil.move(str(cand), str(folder / f["filename"]))
+                        if managed and key:
+                            manifest[key] = f["filename"]
+                        beta = "" if v.get("version_type") == "release" else f" ({v.get('version_type')})"
+                        with CFG_LOCK:  # remember it, so updates don't swap back to the clashing version
+                            CFG.setdefault("pins", {})[f"{pid}|{gv}|{loader}"] = v.get("date_published", "")
+                            save_config(CFG)
+                        pr.update(status="fixed", fix=f"Switched {pr['on_name']} from {_show(pr['have'])} to {_show(cver)}{beta}.")
+                        job.log(f"  fixed: {pr['fix']}")
+                        job.changes.append(pr["on_name"])
+                        break
+            elif pr["type"] == "missing":
+                job.log(f"Looking for {pr['on']}, which {pr['mod']} needs...")
+                try:
+                    proj = http_json("GET", f"{MODRINTH}/project/{urllib.parse.quote(pr['on'])}")
+                    v = proj and mr_latest_for(proj["id"], loaders, gv)
+                except Exception:
+                    proj, v = None, None
+                f = v and mr_primary_file(v)
+                if f:
+                    try:
+                        download(f["url"], folder / f["filename"], (f.get("hashes") or {}).get("sha1"))
+                        if managed:
+                            manifest[f"modrinth:{proj['id']}"] = f["filename"]
+                        pr.update(status="fixed", fix=f"Added {proj.get('title') or pr['on']}.", on_name=proj.get("title") or pr["on"])
+                        job.log(f"  fixed: {pr['fix']}")
+                        job.changes.append(proj.get("title") or pr["on"])
+                    except Exception:
+                        pass
+        if managed:
+            mpath.write_text(json.dumps(manifest, indent=2), "utf-8")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    # anything still open? check again, because one fix can solve (or reveal) another
+    left = check_mods(folder, gv)
+    open_keys = {(x["type"], x["file"], x.get("on")) for x in left}
+    for pr in problems:
+        if pr["status"] == "open" and (pr["type"], pr["file"], pr.get("on")) not in open_keys:
+            pr["status"] = "fixed"
+            pr.setdefault("fix", "Sorted out by another fix.")
+    known = {(x["type"], x["file"], x.get("on")) for x in problems}
+    problems += [dict(x, status="open") for x in left if (x["type"], x["file"], x.get("on")) not in known]
+    return problems
+
+
+def check_and_fix(job, folder: Path, gv, loader, managed=True):
+    job.log("Checking that your mods work together...")
+    problems = check_mods(folder, gv)
+    if problems:
+        problems = fix_problems(job, folder, problems, gv, loader, managed)
+    still = [x for x in problems if x["status"] == "open"]
+    job.log("All your mods work together." if not still else f"{len(still)} problem(s) need you.")
+    return problems
 
 
 # =========================================================================== #
@@ -879,6 +1259,9 @@ def install_job(job, req, remember=True):
 
     job.log(f"Installing {lname} for Minecraft {gv} ({loader}) -> {L['name']}")
     items = resolve(job, favorites, gv, loader, cfg.get("ports") or {})
+    for it in items:
+        if it["key"] in (req.get("skip") or []):
+            it.update(status="off", notes=it["notes"] + ["turned off for this instance"])
     ready = [i for i in items if i["status"] == "ready"]
     if not ready:
         raise UserError(f"Nothing in \"{lname}\" has a {gv} {loader} version yet. Nothing was installed.")
@@ -886,6 +1269,8 @@ def install_job(job, req, remember=True):
     mods_dir = L["prepare"](ctx)
     job.log(f"Downloading {len(ready)} items...")
     install_mods(job, mods_dir, items, managed=not L["finish"])
+    job.progress = 0.93
+    problems = check_and_fix(job, mods_dir, gv, loader, managed=not L["finish"])
     if L["finish"]:
         job.progress = 0.95
         L["finish"](ctx)
@@ -895,7 +1280,7 @@ def install_job(job, req, remember=True):
     job.log(f"Done! {added} installed.")
     install_id = record_install(req, ctx, lid, lname, mods_dir, export=bool(L["finish"]), items=items)
     return {"items": items, "message": ctx.get("message", ""), "open": str(ctx.get("open") or ""),
-            "changes": job.changes, "install_id": install_id}
+            "changes": job.changes, "install_id": install_id, "problems": problems, "export": bool(L["finish"])}
 
 
 # =========================================================================== #
@@ -916,6 +1301,7 @@ def record_install(req, ctx, lid, lname, mods_dir, export, items):
         installs = CFG.setdefault("installs", [])
         old = next((r for r in installs if r["id"] == iid), None)
         rec["installed"] = old.get("installed", now) if old else now
+        rec["disabled"] = (old or {}).get("disabled", [])
         installs[:] = [r for r in installs if r["id"] != iid] + [rec]
         # watch what isn't out yet; stop watching what is
         watch = CFG.setdefault("watch", {})
@@ -937,7 +1323,8 @@ def record_install(req, ctx, lid, lname, mods_dir, export, items):
 
 def install_request(rec):
     return {"version": rec["version"], "loader": rec["loader"], "launcher": rec["launcher"],
-            "name": rec["name"], "folder": rec.get("folder"), "loadout": rec.get("loadout")}
+            "name": rec["name"], "folder": rec.get("folder"), "loadout": rec.get("loadout"),
+            "skip": rec.get("disabled") or []}
 
 
 def update_instance_job(job, iid):
@@ -951,6 +1338,42 @@ def update_instance_job(job, iid):
     return {**res, "instance": rec["name"]}
 
 
+def check_instance_job(job, iid):
+    with CFG_LOCK:
+        rec = next((r for r in CFG.get("installs", []) if r["id"] == iid), None)
+    if not rec or rec["export"] or not rec.get("path"):
+        raise UserError("ModHub can only check instances it installed into a folder.")
+    folder = Path(rec["path"])
+    if not folder.is_dir():
+        raise UserError(f"{rec['name']}'s mods folder is gone.")
+    problems = check_and_fix(job, folder, rec["version"], rec["loader"], managed=True)
+    return {"problems": problems, "install_id": iid, "instance": rec["name"]}
+
+
+def turn_off_mod(iid, file):
+    """Turn a mod off in one instance (renamed to .disabled, which the game skips) and stop re-adding it."""
+    with CFG_LOCK:
+        rec = next((r for r in CFG.get("installs", []) if r["id"] == iid), None)
+    if not rec or not rec.get("path"):
+        raise UserError("ModHub can't change that instance.")
+    folder = Path(rec["path"]).resolve()
+    target = (folder / Path(file).name).resolve()
+    if target.parent != folder or not target.exists() or target.suffix.lower() != ".jar":
+        raise UserError("That mod isn't in this instance any more.")
+    try:
+        manifest = json.loads((folder / MANIFEST_NAME).read_text("utf-8"))
+    except Exception:
+        manifest = {}
+    key = next((k for k, v in manifest.items() if v == target.name), None)
+    os.replace(target, target.with_name(target.name + ".disabled"))
+    with CFG_LOCK:
+        for r in CFG.get("installs", []):
+            if r["id"] == iid and key and key not in r.setdefault("disabled", []):
+                r["disabled"].append(key)
+        save_config(CFG)
+    return {"ok": True, "file": target.name}
+
+
 def update_all_job(job):
     with CFG_LOCK:
         recs = [r for r in CFG.get("installs", []) if not r["export"]]
@@ -961,8 +1384,9 @@ def update_all_job(job):
         job.log(f"--- {rec['name']} ({n} of {len(recs)})")
         before = len(job.changes)
         try:
-            install_job(job, install_request(rec), remember=False)
-            summary.append({"name": rec["name"], "changes": job.changes[before:]})
+            res = install_job(job, install_request(rec), remember=False)
+            summary.append({"name": rec["name"], "changes": job.changes[before:], "install_id": rec["id"],
+                            "problems": res.get("problems") or []})
         except UserError as e:
             summary.append({"name": rec["name"], "error": str(e)})
         job.progress = n / len(recs)
@@ -1423,7 +1847,8 @@ def normalize_repo(url):
     parts = [p for p in u.path.split("/") if p]
     host = u.netloc.lower()
     if host in ("github.com", "www.github.com", "codeberg.org", "gitea.com") and len(parts) >= 2:
-        return f"https://{host.replace('www.', '')}/{parts[0]}/{re.sub(r'\.git$', '', parts[1])}"
+        name = re.sub(r"\.git$", "", parts[1])
+        return "https://" + host.replace("www.", "") + "/" + parts[0] + "/" + name
     if "gitlab" in host:
         path = u.path.split("/-/")[0].rstrip("/")
         return f"https://{host}{path}"
@@ -1739,7 +2164,8 @@ def update_source_url(src):
         return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/main/modhub.py"
     m = re.match(r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)(?:/(?:blob|tree)/([\w.-]+))?", src)
     if m:
-        return f"https://raw.githubusercontent.com/{m.group(1)}/{re.sub(r'.git$', '', m.group(2))}/{m.group(3) or 'main'}/modhub.py"
+        repo = re.sub(r"\.git$", "", m.group(2))
+        return f"https://raw.githubusercontent.com/{m.group(1)}/{repo}/{m.group(3) or 'main'}/modhub.py"
     if src.startswith("https://") or re.match(r"http://(127\.0\.0\.1|localhost)[:/]", src):
         return src
     raise UserError("Use your GitHub repo's name, like yourname/modhub, or a link that starts with https://")
@@ -2086,6 +2512,10 @@ def api(path, body):
         return state()
     if path == "/api/instances/update":
         return {"job": start_job(update_instance_job, body.get("id"))}
+    if path == "/api/instances/check":
+        return {"job": start_job(check_instance_job, body.get("id"))}
+    if path == "/api/problems/turn_off":
+        return turn_off_mod(body.get("id"), body.get("file") or "")
     if path == "/api/instances/update_all":
         return {"job": start_job(update_all_job)}
     if path == "/api/instances/remove":
@@ -3204,6 +3634,16 @@ details.more > summary:hover{color:var(--text)}
 .inst .res-line{margin-top:10px;font-size:13.5px;color:var(--muted)}
 .inst .res-line b{color:var(--ready)}
 .inst.busy{border-color:#4a1c22}
+.prob{display:flex;gap:12px;align-items:flex-start;padding:12px 14px;border-radius:12px;background:var(--stone-2);border:1px solid #24242a;margin-top:10px}
+.prob .ic{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;flex:none;font-weight:800;font-size:14px}
+.prob.open .ic{background:rgba(240,164,58,.15);color:var(--amber)}
+.prob.fixed .ic{background:rgba(69,185,124,.15);color:var(--ready)}
+.prob.off .ic{background:var(--stone-3);color:var(--faint)}
+.prob .grow{flex:1;min-width:0}
+.prob b{display:block;font-weight:650}
+.prob p{margin:3px 0 0;color:var(--muted);font-size:13.5px}
+.prob .actions{margin-top:10px}
+.prob.fixed b{color:var(--muted);font-weight:600;text-decoration:line-through;text-decoration-color:rgba(255,255,255,.25)}
 .catch{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:0 0 12px;border-radius:14px;background:linear-gradient(90deg,rgba(69,185,124,.12),var(--stone-2) 60%);border:1px solid #23402f}
 .catch .grow{flex:1;min-width:0}
 .catch b{display:block}
@@ -3641,6 +4081,11 @@ input:focus,select:focus{box-shadow:0 0 0 3px rgba(215,38,61,.2)}
 <!-- loadout modal -->
 <div class="scrim hidden" id="loModal" role="dialog" aria-modal="true" aria-labelledby="loTitle">
   <div class="modal" id="loBody"></div>
+</div>
+
+<!-- problems popup -->
+<div class="scrim hidden" id="probModal" role="dialog" aria-modal="true" aria-labelledby="probTitle">
+  <div class="modal" id="probBody"></div>
 </div>
 
 <!-- add files modal -->
@@ -4196,7 +4641,10 @@ async function runJob(kind) {
     lastRun = {res, gv, kind};
     if (kind === "install") { refreshVersions(); api("/api/state").then(r => { S = r; renderInstances(); renderCatchUp(); renderLoadouts(); }).catch(() => {}); }
     renderOutcome(res, gv, kind, l);
-    if (kind === "install") burst($("#installBtn"));
+    if (kind === "install") {
+      const shown = showProblems(res.problems, {instanceId: res.install_id, export: res.export, name: body.name});
+      if (!shown || !res.problems.some(p => p.status === "open")) burst($("#installBtn"));
+    }
   } catch (e) {
     $("#progress").classList.add("hidden");
     $("#outcome").innerHTML = `<div class="banner err"><div class="grow"><b>${kind === "install" ? "Install didn't finish" : "Check didn't finish"}</b><p>${esc(e.message)}</p></div></div>`;
@@ -4620,6 +5068,7 @@ function renderInstances() {
         </div></div>
       <div class="actions">
         ${r.export ? `<button class="btn" data-iup="${esc(r.id)}">Build a fresh pack</button>` : `<button class="btn go" data-iup="${esc(r.id)}">Update</button>`}
+        ${r.export ? "" : `<button class="btn" data-icheck="${esc(r.id)}">Check for problems</button>`}
         ${r.open ? `<button class="btn quiet" data-iopen="${esc(r.open)}">Show folder</button>` : ""}
         <button class="btn quiet" data-irm="${esc(r.id)}">Remove from list</button>
       </div>
@@ -4628,6 +5077,7 @@ function renderInstances() {
   }).join("");
   stagger($("#instList"), ".inst");
   $$("[data-iup]").forEach(b => b.onclick = () => updateInstance(b.dataset.iup, b));
+  $$("[data-icheck]").forEach(b => b.onclick = () => checkInstance(b.dataset.icheck, b));
   $$("[data-iopen]").forEach(b => b.onclick = () => api("/api/open", {path: b.dataset.iopen}).catch(e => toast(e.message)));
   $$("[data-irm]").forEach(b => b.onclick = async () => {
     if (!confirm("Remove this from the list? Its files stay where they are.")) return;
@@ -4648,6 +5098,8 @@ async function updateInstance(id, btn) {
     out.innerHTML = changesText(res.changes);
     S = await api("/api/state"); renderInstances();
     const again = $(`.inst[data-inst="${CSS.escape(id)}"] [data-iout]`); if (again) again.innerHTML = changesText(res.changes);
+    const rec = (S.installs || []).find(r => r.id === id) || {};
+    showProblems(res.problems, {instanceId: id, export: rec.export, name: rec.name});
     if (res.changes.length) burst($(`.inst[data-inst="${CSS.escape(id)}"] [data-iup]`));
   } catch (e) {
     out.innerHTML = `<span style="color:var(--missing)">${esc(e.message)}</span>`;
@@ -4665,7 +5117,9 @@ $("#updAll").onclick = async () => {
     $("#instAllOut").innerHTML = `<div class="banner" style="margin:0 0 18px"><div class="grow"><b>${total ? `Updated ${total} ${total === 1 ? "item" : "items"}` : "Everything was already up to date"}</b>
       <p>${res.summary.map(x => `${esc(x.name)}: ${x.error ? `<span style="color:var(--missing)">${esc(x.error)}</span>` : (x.changes.length ? esc([...new Set(x.changes)].join(", ")) : "up to date")}`).join("<br>")}</p></div></div>`;
     S = await api("/api/state"); renderInstances();
-    if (total) burst(b);
+    const withProblems = res.summary.find(x => (x.problems || []).length);
+    if (withProblems) showProblems(withProblems.problems, {instanceId: withProblems.install_id, name: withProblems.name});
+    else if (total) burst(b);
   } catch (e) { $("#instAllOut").innerHTML = `<div class="banner err" style="margin:0 0 18px"><div class="grow"><b>Update didn't finish</b><p>${esc(e.message)}</p></div></div>`; }
   b.disabled = false; b.textContent = "Update all";
 };
@@ -4701,6 +5155,60 @@ function renderCatchUp() {
   });
 }
 setInterval(async () => { try { const r = await api("/api/state"); if (JSON.stringify(r.caught_up) !== JSON.stringify(S.caught_up)) { S.caught_up = r.caught_up; S.installs = r.installs; renderCatchUp(); } } catch (e) {} }, 10 * 60 * 1000);
+
+/* ---------- problems popup ---------- */
+const PROB_ICON = {open: "!", fixed: "✓", off: "–"};
+function showProblems(problems, ctx = {}) {
+  if (!problems || !problems.length) return false;
+  const open = problems.filter(p => p.status === "open"), fixed = problems.filter(p => p.status === "fixed");
+  const canTurnOff = ctx.instanceId && !ctx.export;
+  const row = (p, i) => {
+    const btns = [];
+    if (p.status === "open" && canTurnOff) {
+      btns.push(`<button class="btn sm" data-off="${i}" data-file="${esc(p.file)}">Turn off ${esc(p.mod)}</button>`);
+      if (p.type === "conflict" && p.on_file) btns.push(`<button class="btn sm" data-off="${i}" data-file="${esc(p.on_file)}">Turn off ${esc(p.on_name)}</button>`);
+    }
+    if (p.status === "open" && p.type === "missing") btns.push(`<a class="btn sm quiet" href="https://modrinth.com/mods?q=${encodeURIComponent(p.on)}" target="_blank" rel="noopener">Look for ${esc(p.on)}</a>`);
+    const tip = p.status === "fixed" ? esc(p.fix || "Fixed.")
+      : p.type === "conflict" ? "These two can't run together right now. Turn one off, or wait for an update."
+      : p.type === "minecraft" ? "Turn it off for now, or wait for an update for this version."
+      : p.type === "missing" ? "ModHub couldn't find it on Modrinth. Add it yourself, or turn this mod off."
+      : "Turn it off for now, or wait for an update.";
+    return `<div class="prob ${p.status}" data-prow="${i}"><div class="ic">${PROB_ICON[p.status] || "!"}</div>
+      <div class="grow"><b>${esc(p.message)}</b><p>${tip}</p>${btns.length ? `<div class="actions">${btns.join("")}</div>` : ""}</div></div>`;
+  };
+  $("#probBody").innerHTML = `
+    <h2 id="probTitle">${open.length ? (open.length === 1 ? "One thing needs you" : `${open.length} things need you`) : `ModHub fixed ${fixed.length === 1 ? "a problem" : fixed.length + " problems"}`}</h2>
+    <p class="lede">${open.length
+      ? `Some mods in ${esc(ctx.name || "this instance")} don't work together, so the game would show an error. ${fixed.length ? `ModHub already fixed ${fixed.length}.` : ""}`
+      : `Some mods in ${esc(ctx.name || "this instance")} didn't work together. ModHub sorted it out, so the game should start normally.`}</p>
+    ${open.map(p => row(p, problems.indexOf(p))).join("")}
+    ${fixed.map(p => row(p, problems.indexOf(p))).join("")}
+    ${open.length && ctx.export ? `<p class="help" style="margin-top:12px">This was built as a modpack file, so remove one of the mods from your loadout and build it again.</p>` : ""}
+    <div class="foot"><button class="btn go" data-close>${open.length ? "Done" : "Great"}</button></div>`;
+  openModal("#probModal");
+  $$("#probBody [data-off]").forEach(b => b.onclick = async () => {
+    const rowEl = b.closest(".prob");
+    b.disabled = true;
+    try {
+      await api("/api/problems/turn_off", {id: ctx.instanceId, file: b.dataset.file});
+      rowEl.className = "prob off";
+      rowEl.querySelector(".ic").textContent = "–";
+      rowEl.querySelector(".actions").innerHTML = `<span class="help" style="margin:0">Turned off ${esc(b.textContent.replace("Turn off ", ""))} in this instance. ModHub won't add it back here.</span>`;
+      toast("Turned off");
+    } catch (e) { toast(e.message); b.disabled = false; }
+  });
+  return true;
+}
+async function checkInstance(id, btn) {
+  const label = btn.textContent; btn.disabled = true; btn.innerHTML = `<span class="spin"></span> Checking`;
+  try {
+    const {job} = await api("/api/instances/check", {id});
+    const res = await follow(job);
+    if (!showProblems(res.problems, {instanceId: id, name: res.instance})) toast(`No problems in ${res.instance}`);
+  } catch (e) { toast(e.message); }
+  btn.disabled = false; btn.textContent = label;
+}
 
 /* ---------- new Minecraft versions ---------- */
 let newVerPoll;
