@@ -53,10 +53,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.2", "notes": [
+        "Appearance is simpler: pick one of nine ready-made themes, or Your colour for any colour you like. Every detailed option is still there under More options.",
+        "Discover no longer shows blurry pictures. Mods without screenshots show their icon, sharp and centred.",
+        "ModHub.exe: you can now download ModHub as a normal Windows app from modhub-mc.github.io, with no Python needed. It keeps itself up to date like before.",
+    ]},
     {"version": "3.1", "notes": [
         "New: gradient backgrounds. Your colour fades into black in dark mode, or into white in light mode. Pick Gradient, Vivid, Glow or Plain, choose the direction, and set the strength.",
         "New: any colour you like. Pick Custom under Colour to choose your own.",
@@ -4875,9 +4880,12 @@ details.adv[open] > *:not(summary){margin-top:14px}
 .dcard.has-shot{padding-top:0;overflow:hidden}
 .dcard .shot{margin:0 -16px 2px;aspect-ratio:16/7;overflow:hidden;background:var(--stone-3);position:relative}
 .dcard .shot.empty{background:linear-gradient(135deg,var(--accent-tint),color-mix(in srgb,var(--stone-3) 70%,transparent))}
-.dcard .shot img.blur{position:absolute;inset:-20%;width:140%;height:140%;object-fit:cover;filter:blur(26px) saturate(140%);opacity:.55}
-.dcard .shot img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .5s cubic-bezier(.2,.8,.2,1)}
-.dcard:hover .shot img{transform:scale(1.05)}
+.dcard .shot .mid{position:absolute;inset:0;display:grid;place-items:center}
+.dcard .shot .mid .ico{width:64px;height:64px;border-radius:14px;font-size:26px;box-shadow:0 12px 28px -12px rgb(0 0 0 / calc(.8 * var(--shk)))}
+.dcard .shot.empty{background:radial-gradient(120% 140% at 50% 0%,var(--accent-tint),transparent 70%),repeating-linear-gradient(45deg,rgb(var(--hi) / .025) 0 10px,transparent 10px 20px),var(--stone-3)}
+.dcard.has-shot .shot.empty ~ .top .ico{visibility:hidden;width:0;margin-right:-12px}
+.dcard .shot > img{position:absolute;inset:0;z-index:1;width:100%;height:100%;object-fit:cover;display:block;transition:transform .5s cubic-bezier(.2,.8,.2,1)}
+.dcard:hover .shot > img{transform:scale(1.05)}
 .dcard.has-shot .top{position:relative;align-items:flex-end}
 .dcard.has-shot .top .ico{margin-top:-30px}
 .dcard.has-shot .top .ico{box-shadow:0 0 0 3px var(--stone-2),0 8px 18px -8px rgb(0 0 0 / calc(.8 * var(--shk)))}
@@ -4891,6 +4899,33 @@ details.adv[open] > *:not(summary){margin-top:14px}
 .mp-zoom img{max-width:94vw;max-height:84vh;image-rendering:auto}
 .mp-zoom span{color:#f3f1ef;font-size:14px}
 .ico img{image-rendering:auto}
+
+/* theme tiles */
+.theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.ttile{position:relative;height:118px;border-radius:16px;border:1px solid var(--line);background:var(--tbg);overflow:hidden;cursor:pointer;padding:14px;text-align:left;
+  display:flex;flex-direction:column;justify-content:flex-end;gap:2px;transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s,border-color .2s}
+.ttile:hover{transform:translateY(-3px);box-shadow:0 16px 34px -18px rgb(0 0 0 / calc(.9 * var(--shk)))}
+.ttile.dk{color:#f3f1ef;border-color:#26262c} .ttile.lt{color:#17161a;border-color:#dedde3}
+.ttile b{font:700 15.5px/1.2 var(--display)}
+.ttile small{font-size:12px;opacity:.7}
+.tbars{position:absolute;top:14px;left:14px;right:14px;display:flex;gap:7px}
+.tbars i{width:30px;height:7px;border-radius:4px;background:var(--tc)}
+.tbars s{flex:1;height:7px;border-radius:4px;background:currentColor;opacity:.14}
+.ttile.on{box-shadow:0 0 0 2px var(--stone-2),0 0 0 4px var(--tc)}
+.ttile.on::after{content:"";position:absolute;top:10px;right:10px;width:20px;height:20px;border-radius:50%;background:var(--tc);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='10'/%3E%3C/svg%3E");
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.5 10.5l3 3 6-6.5'/%3E%3C/svg%3E")}
+.ttile.on .tbars{right:40px}
+.ttile input[type=color]{position:absolute;opacity:0;width:1px;height:1px;bottom:0;left:0;pointer-events:none}
+.ap-more{border-top:1px solid var(--line);padding-top:14px}
+.ap-more > summary{cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:10px;font-weight:650;color:var(--text)}
+.ap-more > summary::-webkit-details-marker{display:none}
+.ap-more > summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--faint);border-bottom:2px solid var(--faint);transform:rotate(-45deg);transition:transform .2s;align-self:center}
+.ap-more[open] > summary::before{transform:rotate(45deg)}
+.ap-more > summary span{font-weight:400;font-size:13px;color:var(--faint)}
+.ap-more .ap-opts{margin-top:16px}
+:root[data-radius="sharp"] .ttile{border-radius:3px}
+:root[data-radius="round"] .ttile{border-radius:22px}
 /* ---------- 3.1: backgrounds, customisation, cards ---------- */
 :root{zoom:var(--ui-zoom,1);--gdir:180deg;--gpos:50% -12%}
 :root[data-dir="corner"]{--gdir:150deg;--gpos:0% 0%}
@@ -5174,8 +5209,10 @@ details.card:not([open]){gap:0}
       </div></div>
       <div class="settings">
         <section class="card" id="appearanceCard">
-          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 1 0 0 20c1 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7H16a6 6 0 0 0 6-6C22 6 17.5 2 12 2z"/></svg></span><div><h3>Appearance</h3><p>Colours, background and how ModHub feels. Changes show straight away.</p></div></div>
-          <div class="ap-wrap">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 1 0 0 20c1 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7H16a6 6 0 0 0 6-6C22 6 17.5 2 12 2z"/></svg></span><div><h3>Appearance</h3><p>Pick a theme. Open More options to fine-tune it.</p></div></div>
+          <div class="theme-grid" id="themeGrid" role="radiogroup" aria-label="Themes"></div>
+          <details class="ap-more" id="apMore">
+            <summary>More options <span>Light or dark, colour, background, corners, size and animations</span></summary>
             <div class="ap-opts">
               <div class="opt"><span class="opt-l">Mode</span><div class="seg" id="themeMode" role="radiogroup" aria-label="Light or dark mode"><button data-mode="dark" role="radio">Dark</button><button data-mode="light" role="radio">Light</button><button data-mode="system" role="radio">Match Windows</button></div></div>
               <div class="opt"><span class="opt-l">Colour</span><div class="swatches" id="accentPick" role="radiogroup" aria-label="Colour theme"></div></div>
@@ -5186,12 +5223,9 @@ details.card:not([open]){gap:0}
               <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
               <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio">Small</button><button data-v="100" role="radio">Normal</button><button data-v="110" role="radio">Large</button><button data-v="120" role="radio">Larger</button></div></div>
               <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+              <div class="opt"><span class="opt-l"></span><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
             </div>
-            <div class="ap-side">
-              <div class="ap-prev" aria-hidden="true"><div class="pv-side"><i></i><i class="on"></i><i></i><i></i></div><div class="pv-main"><b></b><s></s><div class="pv-cards"><u></u><u></u><u></u></div><em></em></div></div>
-              <button class="btn quiet sm" id="themeReset">Reset to default</button>
-            </div>
-          </div>
+          </details>
         </section>
         <section class="card">
           <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></span><div><h3>Updates</h3><p id="updText"></p></div></div>
@@ -6991,9 +7025,9 @@ async function loadDiscover() {
   }
 }
 function dcard(m, i, pick, shots) {
-  const art = safeUrl(m.icon) ? `<img class="blur" src="${esc(m.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : "";
+  const art = `<span class="mid">${ico(m)}</span>`;
   return `<div class="dcard ${shots ? "has-shot" : ""} ${pick ? "pick" : ""}" data-dk="${i}" role="button" tabindex="0" aria-label="${esc(m.name)}">
-    ${shots ? "" : "<!--"}<div class="shot ${safeUrl(m.shot) ? "" : "empty"}">${safeUrl(m.shot) ? `<img src="${esc(m.shot)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('empty');this.remove()">` : art}</div>${shots ? "" : "-->"}
+    ${shots ? "" : "<!--"}<div class="shot ${safeUrl(m.shot) ? "" : "empty"}">${safeUrl(m.shot) ? `<img src="${esc(m.shot)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('empty');this.remove()">` : ""}${art}</div>${shots ? "" : "-->"}
     <div class="top">${ico(m)}<div style="min-width:0"><div class="nm">${esc(m.name)}</div><div class="by">${m.author ? "by " + esc(m.author) : "Modrinth"}</div></div></div>
     ${pick && m.why ? `<div class="why">${esc(m.why)}</div>` : `<div class="ds">${esc(m.desc)}</div>`}
     <div class="ft"><span>${fmt(m.downloads)} downloads</span>${isFav(m) ? `<span class="added"><svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M2 7.5l3 3 7-7"/></svg>In library</span>` : `<button class="btn sm go" data-dadd>Add</button>`}</div>
@@ -7140,8 +7174,46 @@ function renderTheme() {
   cc.oninput = () => { const v = cc.value; cc.parentElement.style.setProperty("--sw", v); S.theme = {...t, accent: "custom", custom: v}; applyTheme(S.theme); $$("#accentPick .sw").forEach(x => x.classList.toggle("on", x.classList.contains("custom"))); };
   cc.onchange = () => setTheme({accent: "custom", custom: cc.value});
   $("#bgStrength").value = t.strength; $("#bgStrengthVal").textContent = t.strength + "%";
+  renderThemeTiles(t);
   $$("[data-needs-bg]").forEach(r => r.classList.toggle("hidden", t.bg === "plain"));
   settle();
+}
+const PRESETS = [
+  {id: "crimson", n: "Crimson", m: "Dark, gradient", t: {mode: "dark", accent: "crimson", bg: "gradient", dir: "top"}},
+  {id: "rose", n: "Rose", m: "Dark, vivid", t: {mode: "dark", accent: "rose", bg: "vivid", dir: "corner"}},
+  {id: "violet", n: "Violet", m: "Light, gradient", t: {mode: "light", accent: "violet", bg: "gradient", dir: "top"}},
+  {id: "ocean", n: "Ocean", m: "Dark, glow", t: {mode: "dark", accent: "ocean", bg: "glow", dir: "corner"}},
+  {id: "emerald", n: "Emerald", m: "Light, from the side", t: {mode: "light", accent: "emerald", bg: "gradient", dir: "side"}},
+  {id: "amber", n: "Amber", m: "Dark, from the bottom", t: {mode: "dark", accent: "amber", bg: "gradient", dir: "bottom"}},
+  {id: "midnight", n: "Midnight", m: "Dark, plain", t: {mode: "dark", accent: "crimson", bg: "plain", dir: "top"}},
+  {id: "snow", n: "Snow", m: "Light, plain", t: {mode: "light", accent: "ocean", bg: "plain", dir: "top"}},
+];
+const ACCENT_HEX = Object.fromEntries(ACCENTS.map(a => [a[0], a[2]]));
+function tileBg(t, hex) {
+  const dark = t.mode !== "light", base = dark ? "#0b0b0d" : "#f7f7f9", clear = dark ? "rgba(11,11,13,0)" : "rgba(247,247,249,0)";
+  const deg = {top: "180deg", corner: "150deg", side: "90deg", bottom: "0deg"}[t.dir] || "180deg";
+  const pos = {top: "50% 0%", corner: "0% 0%", side: "0% 50%", bottom: "50% 100%"}[t.dir] || "50% 0%";
+  if (t.bg === "plain") return base;
+  if (t.bg === "glow") return `radial-gradient(130% 95% at ${pos}, ${hex}${dark ? "8c" : "5e"}, ${clear} 70%), ${base}`;
+  if (t.bg === "vivid") return dark ? `linear-gradient(${deg}, ${hex}, ${hex}66 55%, ${base})` : `linear-gradient(${deg}, ${hex}bb, ${hex}33 60%, ${base})`;
+  return `linear-gradient(${deg}, ${hex}${dark ? "8c" : "61"}, ${clear} 75%), ${base}`;
+}
+function tileHtml(id, name, sub, t, hex, on, extra = "", tag = "button") {
+  const dark = t.mode !== "light";
+  return `<${tag} class="ttile ${on ? "on" : ""} ${dark ? "dk" : "lt"}" data-preset="${id}" role="radio" aria-checked="${on}" style="--tbg:${tileBg(t, hex)};--tc:${hex}">
+    <span class="tbars" aria-hidden="true"><i></i><s></s></span><b>${esc(name)}</b><small>${esc(sub)}</small>${extra}</${tag}>`;
+}
+function renderThemeTiles(t) {
+  const resolved = t.mode;
+  const match = p => p.t.mode === resolved && p.t.accent === t.accent && p.t.bg === t.bg && (p.t.bg === "plain" || p.t.dir === t.dir);
+  const custom = t.accent === "custom";
+  $("#themeGrid").innerHTML = PRESETS.map(p => tileHtml(p.id, p.n, p.m, p.t, ACCENT_HEX[p.t.accent], !custom && match(p))).join("")
+    + tileHtml("custom", "Your colour", custom ? "Click to change it" : "Any colour you pick", {mode: t.mode === "light" ? "light" : "dark", bg: t.bg === "plain" ? "gradient" : t.bg, dir: t.dir}, t.custom, custom,
+      `<input type="color" id="customTile" value="${t.custom}" aria-label="Pick your colour">`, "label");
+  $$("#themeGrid button[data-preset]").forEach(b => b.onclick = () => { const p = PRESETS.find(x => x.id === b.dataset.preset); setTheme({...p.t}); });
+  const ct = $("#customTile");
+  ct.oninput = () => { S.theme = {...t, accent: "custom", custom: ct.value, bg: t.bg === "plain" ? "gradient" : t.bg}; applyTheme(S.theme); };
+  ct.onchange = () => setTheme({accent: "custom", custom: ct.value, bg: t.bg === "plain" ? "gradient" : t.bg});
 }
 let themeSave;
 async function setTheme(patch, quiet = false) {
