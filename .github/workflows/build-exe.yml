@@ -184,8 +184,48 @@ jobs:
           name: ${{ matrix.zip }}
           path: ${{ matrix.zip }}
 
+  linux:
+    runs-on: ubuntu-22.04   # an older Linux, so the app also runs on older systems
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the builder
+        run: python -m pip install --upgrade pip pyinstaller
+      - name: Build ModHub for Linux
+        run: >-
+          pyinstaller --noconfirm --clean --onefile
+          --name ModHub --add-data "modhub.py:." --paths .
+          --exclude-module webview
+          exe/launcher.py
+      - name: Check that it starts
+        run: |
+          chmod +x dist/ModHub
+          dist/ModHub --no-browser --port 47999 &
+          pid=$!
+          code=000
+          for i in $(seq 1 30); do
+            sleep 2
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:47999/ || true)
+            [ "$code" != "000" ] && break
+          done
+          kill $pid 2>/dev/null || true
+          if [ "$code" != "403" ]; then
+            echo "ModHub for Linux didn't start (got $code). Its log:"
+            cat ~/.modhub/modhub.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "ModHub for Linux started and answered, as it should."
+      - name: Pack it
+        run: tar -czf ModHub-linux.tar.gz -C dist ModHub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ModHub-linux.tar.gz
+          path: ModHub-linux.tar.gz
+
   publish:
-    needs: [windows, mac]
+    needs: [windows, mac, linux]
     if: ${{ !cancelled() && needs.windows.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -200,7 +240,7 @@ jobs:
           sudo freshclam --quiet || sudo freshclam
           mkdir scan
           cp out/windows/dist/ModHub.exe scan/
-          for z in ModHub-mac.zip ModHub-mac-intel.zip; do [ -f "out/$z/$z" ] && cp "out/$z/$z" scan/; done
+          for z in ModHub-mac.zip ModHub-mac-intel.zip ModHub-linux.tar.gz; do [ -f "out/$z/$z" ] && cp "out/$z/$z" scan/; done
           set +e; clamscan --scan-archive=yes --max-filesize=200M --max-scansize=400M -r scan | tee clam.txt; code=${PIPESTATUS[0]}; set -e
           ver=$(clamscan --version)
           if [ "$code" = "0" ]; then r=clean; elif [ "$code" = "1" ]; then r=threat; else r=error; fi
@@ -247,7 +287,7 @@ jobs:
           v=$(python3 -c "import re;print(re.search(r'^APP_VERSION = \"([^\"]+)\"', open('modhub.py', encoding='utf-8').read(), re.M).group(1))")
           tag="v$v"
           files="out/windows/dist/ModHub.exe"
-          for z in ModHub-mac.zip ModHub-mac-intel.zip; do
+          for z in ModHub-mac.zip ModHub-mac-intel.zip ModHub-linux.tar.gz; do
             [ -f "out/$z/$z" ] && files="$files out/$z/$z"
           done
           python3 - <<'PY'

@@ -53,10 +53,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0.1"
+APP_VERSION = "4.0.2"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "4.0.2", "notes": [
+        "ModHub is now on Linux too. Download it from the website, extract it and run ModHub.",
+    ]},
     {"version": "4.0", "notes": [
         "New Home page: see which mods have updates, your instances, recent fixes and mods worth a look, all in one place. It's the first thing you see when you open ModHub.",
         "Mod updates in one place: ModHub checks every instance for newer versions of your mods, shows what changed in each one, and updates them all in one click.",
@@ -3920,7 +3923,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "mod_updates": cfg.get("mod_updates"), "live_ping": cfg.get("live_ping"), "dev_mode": bool(cfg.get("dev_mode")), "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "app_switch": app_switch_state(),
+            "mod_updates": cfg.get("mod_updates"), "live_ping": cfg.get("live_ping"), "dev_mode": bool(cfg.get("dev_mode")), "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "os": platform.system(), "app_switch": app_switch_state(),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -4922,8 +4925,20 @@ def create_shortcuts():
     # Linux
     apps = Path.home() / ".local" / "share" / "applications"
     apps.mkdir(parents=True, exist_ok=True)
+    if FROZEN:  # the ModHub app for Linux: keep a copy where it won't be tidied away, and point the shortcuts at it
+        home_bin = Path.home() / ".local" / "share" / "ModHub" / "ModHub"
+        here = Path(sys.executable).resolve()
+        if here != home_bin:
+            home_bin.parent.mkdir(parents=True, exist_ok=True)
+            tmp = home_bin.with_suffix(".new")
+            shutil.copy2(here, tmp)
+            tmp.chmod(0o755)
+            os.replace(tmp, home_bin)
+        run = f"\"{home_bin}\""
+    else:
+        run = f"\"{sys.executable}\" \"{script}\""
     entry = (f"[Desktop Entry]\nType=Application\nName=ModHub\nComment=Install your Minecraft mods into any version\n"
-             f"Exec=\"{sys.executable}\" \"{script}\"\nIcon={icons / 'modhub.png'}\nTerminal=false\n"
+             f"Exec={run}\nIcon={icons / 'modhub.png'}\nTerminal=false\n"
              "Categories=Game;\n")
     made = []
     (apps / "modhub.desktop").write_text(entry, "utf-8")
@@ -4956,7 +4971,7 @@ def console_python():
 
 def install_webview_job(job):
     if FROZEN:
-        raise UserError("ModHub.exe already includes its own window. Download ModHub.exe again if it doesn't open.")
+        raise UserError("The ModHub app already includes everything it can. Download it again if it doesn't open.")
     py = console_python()
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
     cmd = [py, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "pywebview"]
@@ -7394,6 +7409,9 @@ function watchAppSwitch() {
 function renderWindowBits() {
   // Only shown when something needs you: a window that didn't open, or the switch to the app.
   const sw = S.app_switch;
+  if (S.frozen && !S.native && !S.webview_installed) {  // the Linux app opens in a Chrome or browser window; there's nothing to set up
+    $("#nativeBanner").classList.add("hidden"); $("#appCard").classList.add("hidden"); return;
+  }
   $("#appCard").classList.toggle("hidden", !!S.native);
   if (sw && sw.available && !S.native) {
     $("#nativeBanner").classList.add("hidden");

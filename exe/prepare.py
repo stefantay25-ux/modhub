@@ -25,6 +25,8 @@ body = "\n".join(f"- {n}" for n in notes) or "- Improvements and fixes."
     "**Mac:** download **ModHub-mac.zip** (Macs with Apple chips) or **ModHub-mac-intel.zip** (older Intel Macs), "
     "open it, and drag ModHub into Applications. The first time, macOS may say it can't check ModHub: open "
     "**System Settings > Privacy & Security**, scroll down and click **Open Anyway**.\n\n"
+    "**Linux:** download **ModHub-linux.tar.gz**, extract it, and run **ModHub** (double-click it, or `./ModHub` in a terminal). "
+    "It opens in a Chrome or Chromium window if you have one, otherwise in your browser. Choose **Add shortcut** in ModHub to put it in your app menu.\n\n"
     "You only need to do that once. ModHub keeps itself up to date after that.\n",
     "utf-8")
 
