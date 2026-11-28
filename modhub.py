@@ -53,10 +53,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.7.1"
+APP_VERSION = "3.7.2"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.7.2", "notes": [
+        "ModHub now checks for updates every 30 minutes instead of every 6 hours, and checks again when you come back to it, so you get new versions sooner.",
+        "When a new version is ready, ModHub tells you straight away.",
+        "Even more secrets are hidden around ModHub. Settings now shows how many you've found.",
+    ]},
     {"version": "3.7.1", "notes": [
         "Seven new themes: Sunset, Aurora, Nether, The End, Deep sea, Cherry and Mint.",
         "Some of them move: Aurora has drifting lights, Nether has rising embers, The End has twinkling stars, and Deep sea has rising bubbles. Turn Animations off in More options if you'd rather they stayed still.",
@@ -3078,8 +3083,8 @@ def update_search_dirs():
 
 
 THEME_MODES = ("dark", "light", "system")
-THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose", "sunset", "aurora", "nether", "ender", "cherry", "mint", "lime", "rainbow", "custom")
-SECRETS = ("rainbow", "retro")
+THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose", "sunset", "aurora", "nether", "ender", "cherry", "mint", "lime", "rainbow", "diamond", "owl", "mono", "ghost", "gold", "custom")
+SECRETS = ("rainbow", "retro", "diamond", "nightowl", "void", "ghost", "golden")
 THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain", "aurora", "stars", "embers"), "font": ("normal", "mono"), "dir": ("top", "corner", "side", "bottom"),
                  "radius": ("sharp", "rounded", "round"), "side": ("glass", "solid"),
                  "size": ("90", "100", "110", "120"), "motion": ("full", "less", "off")}
@@ -3179,7 +3184,10 @@ def find_update(force=False):
 
 
 # ---- automatic updates from an online copy (for example a GitHub repo) ----
-UPDATE_CHECK_SECONDS = 6 * 60 * 60
+UPDATE_CHECK_SECONDS = 30 * 60   # we ship often, so look every half hour
+UPDATE_NUDGE_SECONDS = 5 * 60   # and when you come back to the window, if it's been a few minutes
+UPDATE_WAKE = threading.Event()
+UPDATE_LAST = {"t": 0.0}
 
 
 # Where ModHub gets its updates. Everyone pulls from the official repo unless they chose another.
@@ -3210,6 +3218,7 @@ def update_source_url(src):
 
 def check_online_update():
     """Download a newer ModHub from your update source, if there is one. It's installed on the next start."""
+    UPDATE_LAST["t"] = time.time()
     with CFG_LOCK:
         url = update_source_url(current_update_source())
     if not url:
@@ -3256,7 +3265,8 @@ def update_watch():
             check_online_update()
         except Exception:
             traceback.print_exc()
-        time.sleep(UPDATE_CHECK_SECONDS)
+        UPDATE_WAKE.wait(UPDATE_CHECK_SECONDS)
+        UPDATE_WAKE.clear()
 
 
 def staged_update():
@@ -3743,6 +3753,13 @@ def api(path, body):
             CFG.pop("just_updated", None)
             save_config(CFG)
         return {"ok": True}
+    if path == "/api/update/nudge":
+        due = time.time() - UPDATE_LAST["t"] > UPDATE_NUDGE_SECONDS
+        if due and current_update_source():
+            UPDATE_WAKE.set()
+        return {"nudged": due}
+    if path == "/api/update/status":
+        return {"update": find_update(), "update_last_check": CFG.get("update_last_check")}
     if path == "/api/update/check":
         if current_update_source():
             check_online_update()
@@ -4797,6 +4814,11 @@ PAGE = r'''<!DOCTYPE html>
 :root[data-accent="mint"]{--acc:14 166 116; --acc2:52 211 153; --acc3:6 116 84}
 :root[data-accent="lime"]{--acc:74 196 64; --acc2:126 230 104; --acc3:34 128 36}
 :root[data-accent="rainbow"]{--acc:124 58 237; --acc2:147 97 250; --acc3:90 38 180}
+:root[data-accent="diamond"]{--acc:34 211 238; --acc2:125 236 250; --acc3:14 116 144}
+:root[data-accent="owl"]{--acc:245 176 50; --acc2:255 210 110; --acc3:30 48 120}
+:root[data-accent="mono"]{--acc:214 214 222; --acc2:255 255 255; --acc3:90 90 100; --accent-ink:#0b0b0d}
+:root[data-accent="ghost"]{--acc:128 140 168; --acc2:176 186 206; --acc3:96 104 140}
+:root[data-accent="gold"]{--acc:234 170 8; --acc2:252 211 77; --acc3:146 88 6; --accent-ink:#1a1204}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--stone);color:var(--text);font:15px/1.5 var(--body);-webkit-font-smoothing:antialiased}
@@ -5582,6 +5604,7 @@ body,.ap-prev{background-color:var(--stone)}
 .brand.spin .mark{animation:bspin .9s cubic-bezier(.3,1.4,.5,1)}
 @keyframes bspin{to{transform:rotate(1turn) scale(1)}}
 .ttile.secret small::before{content:"\2605 ";}
+.secret-count{margin:12px 2px 0;font-size:13px;color:var(--muted)}
 .app{min-height:calc(100vh / var(--ui-zoom,1))}
 .side{height:calc(100vh / var(--ui-zoom,1))}
 .modal{max-height:calc(92vh / var(--ui-zoom,1))}
@@ -5858,6 +5881,7 @@ details.card:not([open]){gap:0}
         <section class="card" id="appearanceCard">
           <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 1 0 0 20c1 0 1.7-.8 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.8-1.7 1.7-1.7H16a6 6 0 0 0 6-6C22 6 17.5 2 12 2z"/></svg></span><div><h3>Appearance</h3><p>Pick a theme. Open More options to fine-tune it.</p></div></div>
           <div class="theme-grid" id="themeGrid" role="radiogroup" aria-label="Themes"></div>
+          <p class="secret-count hidden" id="secretCount"></p>
           <details class="ap-more" id="apMore">
             <summary>More options <span>Light or dark, colour, background, corners, size and animations</span></summary>
             <div class="ap-opts">
@@ -6801,10 +6825,10 @@ function renderUpdateBits() {
   if (u && u.where === "online") $("#updText").textContent = `ModHub ${u.version} has been downloaded. ${S.update_auto ? "It installs by itself next time you open ModHub, or" : "You can"} update now.`;
   $("#updAuto").checked = S.update_auto !== false;
   const lc = S.update_last_check;
-  $("#updSourceStatus").innerHTML = !lc ? "ModHub checks for updates every 6 hours."
+  $("#updSourceStatus").innerHTML = !lc ? "ModHub checks for updates every 30 minutes."
     : lc.status === "error" ? `<span style="color:var(--missing)">Last check didn't work: ${esc(lc.message)}.</span>`
     : lc.status === "downloaded" ? `<span class="ok">Downloaded ModHub ${esc(lc.version)}.</span>`
-    : `<span class="ok">Up to date.</span> Checked ${esc(timeAgo(lc.at))}. ModHub checks every 6 hours.`;
+    : `<span class="ok">Up to date.</span> Checked ${esc(timeAgo(lc.at))}. ModHub checks every 30 minutes.`;
 }
 function timeAgo(iso) {
   const d = (Date.now() - Date.parse(iso)) / 1000;
@@ -7472,6 +7496,21 @@ $("#newVerGo").onclick = () => {
 $("#newVerLater").onclick = async () => { Object.assign(S, await api("/api/versions/seen")); renderNewVersion(); renderVersions(getVersion()); };
 setInterval(() => refreshVersions(true), 15 * 60 * 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshVersions(true); });
+// updates: pick up anything the background check found, and check again when you come back after a while
+async function pollUpdate() {
+  try {
+    const r = await api("/api/update/status");
+    const was = S.update && S.update.version;
+    S.update = r.update; if (r.update_last_check) S.update_last_check = r.update_last_check;
+    renderUpdateBits();
+    if (r.update && r.update.version !== was) toast(`ModHub ${r.update.version} is ready. It installs next time you open ModHub, or update now in Settings.`);
+  } catch (e) {}
+}
+setInterval(pollUpdate, 5 * 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  api("/api/update/nudge").then(r => { if (r.nudged) setTimeout(pollUpdate, 20000); else pollUpdate(); }).catch(() => {});
+});
 window.addEventListener("focus", () => refreshVersions(true));
 
 /* "/" jumps to search */
@@ -7891,7 +7930,9 @@ function renderModPage(p, ctx) {
 const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["rose", "Rose", "#d62976"], ["violet", "Violet", "#7c3aed"], ["ocean", "Ocean", "#2563eb"], ["emerald", "Emerald", "#0e9e5a"], ["amber", "Amber", "#ca7008"],
   ["sunset", "Sunset", "#f46220", "#db2777"], ["aurora", "Aurora", "#14b8a6", "#7c3aed"], ["nether", "Nether", "#e24216", "#8c1018"], ["ender", "The End", "#a855f7", "#401e8c"],
   ["cherry", "Cherry", "#e25492", "#b02a68"], ["mint", "Mint", "#0ea674", "#067454"]];
-const SECRET_ACCENTS = [["lime", "Retro green", "#4ac440", "#228024"], ["rainbow", "Rainbow", "#7c3aed", "#ec4899"]];
+const SECRET_ACCENTS = [["lime", "Retro green", "#4ac440", "#228024", "retro"], ["rainbow", "Rainbow", "#7c3aed", "#ec4899", "rainbow"],
+  ["diamond", "Diamond", "#22d3ee", "#0e7490", "diamond"], ["owl", "Night owl", "#f5b032", "#1e3078", "nightowl"], ["mono", "Void", "#d6d6de", "#5a5a64", "void"],
+  ["ghost", "Ghost", "#808ca8", "#60688c", "ghost"], ["gold", "Gold", "#eaaa08", "#925806", "golden"]];
 const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "full", font: "normal"};
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 function accentTriplets(hex) {
@@ -7923,7 +7964,7 @@ function renderTheme() {
   const t = {...THEME_DEFAULT, ...(S.theme || {})};
   $$("#themeMode button").forEach(b => { b.classList.toggle("on", b.dataset.mode === t.mode); b.setAttribute("aria-checked", b.dataset.mode === t.mode); });
   $$("[data-opt]").forEach(g => g.querySelectorAll("button").forEach(b => { const on = String(t[g.dataset.opt]) === b.dataset.v; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); }));
-  $("#accentPick").innerHTML = ACCENTS.concat(SECRET_ACCENTS.filter(x => (S.secrets || []).includes(x[0] === "lime" ? "retro" : x[0]))).map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}" aria-label="${n}"><i></i></button>`).join("")
+  $("#accentPick").innerHTML = ACCENTS.concat(SECRET_ACCENTS.filter(x => (S.secrets || []).includes(x[4]))).map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}" aria-label="${n}"><i></i></button>`).join("")
     + `<label class="sw custom ${t.accent === "custom" ? "on" : ""}" style="--sw:${t.custom}" title="Pick any colour"><i></i><input type="color" id="customColor" value="${t.custom}" aria-label="Pick any colour"></label>`;
   $$("#accentPick [data-accent]").forEach(b => b.onclick = () => setTheme({accent: b.dataset.accent}));
   const cc = $("#customColor");
@@ -7954,7 +7995,13 @@ const PRESETS = [
 const SECRET_PRESETS = {
   rainbow: {id: "rainbow", n: "Rainbow", m: "Secret: every colour", t: {mode: "dark", accent: "rainbow", bg: "aurora", dir: "top"}},
   retro: {id: "retro", n: "Retro", m: "Secret: old-school screen", t: {mode: "dark", accent: "lime", bg: "glow", dir: "corner", font: "mono"}},
+  diamond: {id: "diamond", n: "Diamond", m: "Secret: ice-cold sparkle", t: {mode: "dark", accent: "diamond", bg: "stars", dir: "corner"}},
+  nightowl: {id: "nightowl", n: "Night owl", m: "Secret: for late nights", t: {mode: "dark", accent: "owl", bg: "stars", dir: "top"}},
+  void: {id: "void", n: "Void", m: "Secret: nothing but black", t: {mode: "dark", accent: "mono", bg: "plain", dir: "top"}},
+  ghost: {id: "ghost", n: "Ghost", m: "Secret: pale and see-through", t: {mode: "light", accent: "ghost", bg: "aurora", dir: "top"}},
+  golden: {id: "golden", n: "Gold", m: "Secret: for big collections", t: {mode: "dark", accent: "gold", bg: "embers", dir: "bottom"}},
 };
+const SECRET_NAMES = {rainbow: "Rainbow", retro: "Retro", diamond: "Diamond", nightowl: "Night owl", void: "Void", ghost: "Ghost", golden: "Gold"};
 const ACCENT_HEX = Object.fromEntries(ACCENTS.concat(SECRET_ACCENTS).map(a => [a[0], a[2]]));
 const ACCENT_HEX2 = Object.fromEntries(ACCENTS.concat(SECRET_ACCENTS).map(a => [a[0], a[3] || a[2]]));
 function tileBg(t, hex) {
@@ -7980,6 +8027,7 @@ function renderThemeTiles(t) {
   const resolved = t.mode;
   const match = p => p.t.mode === resolved && p.t.accent === t.accent && p.t.bg === t.bg && (p.t.bg === "plain" || p.t.dir === t.dir) && (p.t.font || "normal") === (t.font || "normal");
   const secrets = (S.secrets || []).map(k => SECRET_PRESETS[k]).filter(Boolean);
+  const sc = $("#secretCount"); if (sc) { sc.classList.toggle("hidden", !secrets.length); sc.textContent = `\u2605 ${secrets.length} of ${Object.keys(SECRET_PRESETS).length} secret themes found` + (secrets.length === Object.keys(SECRET_PRESETS).length ? ". You found them all!" : ""); }
   const custom = t.accent === "custom";
   $("#themeGrid").innerHTML = PRESETS.concat(secrets).map(p => tileHtml(p.id, p.n, p.m, p.t, ACCENT_HEX[p.t.accent], !custom && match(p)).replace('class="ttile', SECRET_PRESETS[p.id] ? 'class="ttile secret' : 'class="ttile')).join("")
     + tileHtml("custom", "Your colour", custom ? "Click to change it" : "Any colour you pick", {mode: t.mode === "light" ? "light" : "dark", bg: t.bg === "plain" ? "gradient" : t.bg, dir: t.dir}, t.custom, custom,
@@ -8050,7 +8098,7 @@ async function unlockSecret(name, how) {
   try {
     const r = await api("/api/secret", {name});
     S.secrets = r.secrets; renderTheme();
-    const title = {rainbow: "Rainbow", retro: "Retro"}[name];
+    const title = SECRET_NAMES[name];
     toast(r.new ? `${how} You unlocked the ${title} theme. It's in Settings, under Appearance.` : `${how} You already have the ${title} theme.`);
     return r.new;
   } catch (e) { toast(e.message); }
@@ -8065,9 +8113,10 @@ function runCommand(raw) {
   else if (c === "/weather clear") { weather(null); say("Changing to clear weather."); }
   else if (c === "/gamemode creative") { blockParty(); say("Set own game mode to Creative Mode."); }
   else if (c === "/gamemode survival") { say("Set own game mode to Survival Mode. Your mods are still safe."); }
-  else if (c === "/gamemode spectator") { document.documentElement.animate([{opacity: 1}, {opacity: .35}, {opacity: 1}], {duration: 2200}); say("Set own game mode to Spectator Mode."); }
+  else if (c === "/gamemode spectator") { document.documentElement.animate([{opacity: 1}, {opacity: .35}, {opacity: 1}], {duration: 2200}); unlockSecret("ghost", "Set own game mode to Spectator Mode."); }
+  else if (c.startsWith("/give") && c.includes("diamond")) { blockParty(60); unlockSecret("diamond", "You got a diamond!"); }
   else if (c.startsWith("/give")) { blockParty(40); say("There are no diamonds here, but here are some blocks."); }
-  else if (c === "/kill" || c === "/kill @s") { say("ModHub fell out of the world. Just kidding, it's fine."); }
+  else if (c === "/kill" || c === "/kill @s") { document.documentElement.animate([{filter: "brightness(1)"}, {filter: "brightness(0)"}, {filter: "brightness(1)"}], {duration: 1600}); unlockSecret("void", "ModHub fell out of the world."); }
   else if (c === "/seed") { say("Seed: [" + (Math.random() * 2 ** 53 | 0) * (Math.random() < .5 ? -1 : 1) + "]"); }
   else if (c === "/help" || c === "/?") { say("Try /time set night, /weather rain, /gamemode creative, /seed and a few more you'll have to find."); }
   else say(`Unknown command: ${raw.trim()}. Try /help.`);
@@ -8091,6 +8140,17 @@ function runCommand(raw) {
     b.classList.remove("spin"); void b.offsetWidth; b.classList.add("spin");
     if (++n === 5) { n = 0; unlockSecret("retro", "Old-school mode found!"); }
   });
+})();
+// night owls and big collections
+(() => {
+  const has = k => (S && S.secrets || []).includes(k);
+  const check = () => {
+    if (!S || !S.favorites) return;
+    const h = new Date().getHours();
+    if (h >= 2 && h < 5 && !has("nightowl")) unlockSecret("nightowl", "Still up?");
+    if (S.favorites.length >= 25 && !has("golden")) unlockSecret("golden", "25 mods in your library!");
+  };
+  setTimeout(check, 4000); setInterval(check, 30000);
 })();
 // a little snow at the end of the year
 (() => { const d = new Date(); if (d.getMonth() === 11 && d.getDate() >= 20) setTimeout(() => weather("snow", 30000), 2500); })();
