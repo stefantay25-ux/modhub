@@ -53,10 +53,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.7"
+APP_VERSION = "3.7.1"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.7.1", "notes": [
+        "Seven new themes: Sunset, Aurora, Nether, The End, Deep sea, Cherry and Mint.",
+        "Some of them move: Aurora has drifting lights, Nether has rising embers, The End has twinkling stars, and Deep sea has rising bubbles. Turn Animations off in More options if you'd rather they stayed still.",
+        "There are a few secrets hidden around ModHub. Have a look around.",
+    ]},
     {"version": "3.7", "notes": [
         "ModHub now checks your mods before you play: if an instance's mods change, even ones you added by hand, it checks and fixes them right away.",
         "Spots two copies of the same mod and turns off the extra one.",
@@ -3073,12 +3078,13 @@ def update_search_dirs():
 
 
 THEME_MODES = ("dark", "light", "system")
-THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose", "custom")
-THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain"), "dir": ("top", "corner", "side", "bottom"),
+THEME_ACCENTS = ("crimson", "emerald", "ocean", "violet", "amber", "rose", "sunset", "aurora", "nether", "ender", "cherry", "mint", "lime", "rainbow", "custom")
+SECRETS = ("rainbow", "retro")
+THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain", "aurora", "stars", "embers"), "font": ("normal", "mono"), "dir": ("top", "corner", "side", "bottom"),
                  "radius": ("sharp", "rounded", "round"), "side": ("glass", "solid"),
                  "size": ("90", "100", "110", "120"), "motion": ("full", "less", "off")}
 THEME_DEFAULTS = {"mode": "dark", "accent": "crimson", "custom": "#d7263d", "bg": "gradient", "dir": "top", "strength": 55,
-                  "radius": "rounded", "side": "glass", "size": "100", "motion": "full"}
+                  "radius": "rounded", "side": "glass", "size": "100", "motion": "full", "font": "normal"}
 
 
 def theme_of(cfg):
@@ -3116,7 +3122,7 @@ def page_html():
     with CFG_LOCK:
         t = theme_of(CFG)
     attrs = (f'data-pref="{t["mode"]}" data-accent="{t["accent"]}" data-bg="{t["bg"]}" data-dir="{t["dir"]}" '
-             f'data-radius="{t["radius"]}" data-side="{t["side"]}" data-motion="{t["motion"]}" style="{theme_vars(t)}"')
+             f'data-radius="{t["radius"]}" data-side="{t["side"]}" data-motion="{t["motion"]}" data-font="{t["font"]}" style="{theme_vars(t)}"')
     return PAGE.replace("__TOKEN__", TOKEN).replace('<html lang="en">', f'<html lang="en" {attrs}>', 1)
 
 
@@ -3459,7 +3465,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "theme": theme_of(cfg), "frozen": FROZEN, "app_switch": app_switch_state(),
+            "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "app_switch": app_switch_state(),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -3637,6 +3643,17 @@ def api(path, body):
             threading.Thread(target=switch_to_app, kwargs={"manual": True}, daemon=True).start()
             time.sleep(0.2)
         return app_switch_state()
+    if path == "/api/secret":
+        name = body.get("name")
+        if name not in SECRETS:
+            raise UserError("That's not a secret.")
+        with CFG_LOCK:
+            found = [x for x in CFG.get("secrets", []) if x in SECRETS]
+            new = name not in found
+            if new:
+                CFG["secrets"] = found + [name]
+                save_config(CFG)
+        return {"secrets": CFG["secrets"] if new else found, "new": new}
     if path == "/api/theme":
         with CFG_LOCK:
             if body.get("reset"):
@@ -4772,6 +4789,14 @@ PAGE = r'''<!DOCTYPE html>
 :root[data-accent="violet"]{--acc:124 58 237; --acc2:147 97 250; --acc3:90 38 180}
 :root[data-accent="amber"]{--acc:202 112 8; --acc2:232 142 22; --acc3:150 82 6}
 :root[data-accent="rose"]{--acc:214 41 118; --acc2:236 72 153; --acc3:160 28 88}
+:root[data-accent="sunset"]{--acc:244 98 32; --acc2:251 146 60; --acc3:219 39 119}
+:root[data-accent="aurora"]{--acc:20 184 166; --acc2:94 234 212; --acc3:124 58 237}
+:root[data-accent="nether"]{--acc:226 66 22; --acc2:255 122 48; --acc3:140 16 24}
+:root[data-accent="ender"]{--acc:168 85 247; --acc2:196 140 255; --acc3:64 30 140}
+:root[data-accent="cherry"]{--acc:226 84 146; --acc2:244 140 184; --acc3:176 42 104}
+:root[data-accent="mint"]{--acc:14 166 116; --acc2:52 211 153; --acc3:6 116 84}
+:root[data-accent="lime"]{--acc:74 196 64; --acc2:126 230 104; --acc3:34 128 36}
+:root[data-accent="rainbow"]{--acc:124 58 237; --acc2:147 97 250; --acc3:90 38 180}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{background:var(--stone);color:var(--text);font:15px/1.5 var(--body);-webkit-font-smoothing:antialiased}
@@ -5524,6 +5549,39 @@ body,.ap-prev{background-color:var(--stone)}
 :root[data-bg="vivid"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc) / calc(.9 * var(--bgk,.55))) 0%,rgb(var(--acc3) / calc(.5 * var(--bgk,.55))) 48%,rgb(var(--acc3) / calc(.16 * var(--bgk,.55))) 100%)}
 :root[data-mode="light"][data-bg="vivid"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc2) / calc(.75 * var(--bgk,.55))) 0%,rgb(var(--acc2) / calc(.28 * var(--bgk,.55))) 50%,rgb(var(--acc2) / calc(.08 * var(--bgk,.55))) 100%)}
 :root[data-bg="glow"] :is(body,.ap-prev){background-image:radial-gradient(1100px 720px at var(--gpos),rgb(var(--acc) / calc(.42 * var(--bgk,.55))),transparent 64%)}
+/* 3.7.1: moving backgrounds */
+:root[data-bg="aurora"] :is(body,.ap-prev){background-image:radial-gradient(60% 50% at 18% 0%,rgb(var(--acc) / calc(.55 * var(--bgk,.55))),transparent 70%),radial-gradient(55% 45% at 85% 10%,rgb(var(--acc3) / calc(.5 * var(--bgk,.55))),transparent 70%),radial-gradient(70% 50% at 50% 100%,rgb(var(--acc2) / calc(.22 * var(--bgk,.55))),transparent 70%)}
+:root[data-bg="aurora"] body::before{content:"";position:fixed;inset:-25%;z-index:-1;pointer-events:none;
+  background:radial-gradient(28% 22% at 30% 28%,rgb(var(--acc2) / calc(.5 * var(--bgk,.55))),transparent 70%),radial-gradient(26% 20% at 70% 22%,rgb(var(--acc3) / calc(.45 * var(--bgk,.55))),transparent 70%),radial-gradient(30% 24% at 50% 40%,rgb(var(--acc) / calc(.35 * var(--bgk,.55))),transparent 70%);
+  filter:blur(30px);animation:aurora 26s ease-in-out infinite alternate}
+@keyframes aurora{0%{transform:translate(-6%,-3%) rotate(-4deg) scale(1)}50%{transform:translate(5%,4%) rotate(5deg) scale(1.12)}100%{transform:translate(-2%,6%) rotate(-2deg) scale(.95)}}
+:root[data-bg="stars"] :is(body,.ap-prev){background-image:radial-gradient(1000px 640px at var(--gpos),rgb(var(--acc) / calc(.42 * var(--bgk,.55))),transparent 66%),radial-gradient(900px 600px at 100% 100%,rgb(var(--acc3) / calc(.4 * var(--bgk,.55))),transparent 66%)}
+:root[data-bg="stars"] body::before,:root[data-bg="stars"] body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:radial-gradient(2.4px 2.4px at 12% 18%,rgb(var(--hi)),rgb(var(--hi) / 0)),radial-gradient(1.6px 1.6px at 38% 62%,rgb(var(--hi) / .85),rgb(var(--hi) / 0)),radial-gradient(2.8px 2.8px at 66% 30%,rgb(var(--hi)),rgb(var(--hi) / 0)),radial-gradient(1.6px 1.6px at 84% 74%,rgb(var(--hi) / .8),rgb(var(--hi) / 0)),radial-gradient(2.4px 2.4px at 52% 8%,rgb(var(--acc2)),rgb(var(--acc2) / 0)),radial-gradient(1.8px 1.8px at 24% 88%,rgb(var(--hi) / .85),rgb(var(--hi) / 0)),radial-gradient(2px 2px at 92% 40%,rgb(var(--acc2) / .9),rgb(var(--acc2) / 0)),radial-gradient(1.4px 1.4px at 5% 50%,rgb(var(--hi) / .8),rgb(var(--hi) / 0));
+  filter:drop-shadow(0 0 3px rgb(var(--hi) / .6));
+  background-size:300px 260px;animation:twinkle 5s ease-in-out infinite alternate}
+:root[data-bg="stars"] body::after{background-size:520px 460px;background-position:130px 90px;animation-duration:7s;animation-delay:-3s}
+@keyframes twinkle{0%{opacity:.35}100%{opacity:1}}
+:root[data-bg="embers"] :is(body,.ap-prev){background-image:linear-gradient(var(--gdir),rgb(var(--acc) / calc(.7 * var(--bgk,.55))) 0%,rgb(var(--acc3) / calc(.35 * var(--bgk,.55))) 40%,transparent 80%)}
+:root[data-bg="embers"] body::before,:root[data-bg="embers"] body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:radial-gradient(3.5px 3.5px at 10% 20%,rgb(var(--acc2)),rgb(var(--acc2) / 0)),radial-gradient(2.5px 2.5px at 40% 70%,rgb(var(--acc2) / .95),rgb(var(--acc2) / 0)),radial-gradient(4px 4px at 70% 40%,rgb(var(--acc2)),rgb(var(--acc) / 0)),radial-gradient(2.5px 2.5px at 85% 85%,rgb(var(--acc2) / .9),rgb(var(--acc2) / 0)),radial-gradient(3px 3px at 25% 55%,rgb(var(--hi) / .7),rgb(var(--hi) / 0)),radial-gradient(3px 3px at 58% 12%,rgb(var(--acc2) / .9),rgb(var(--acc2) / 0));
+  filter:drop-shadow(0 0 4px rgb(var(--acc2) / .9));
+  background-size:260px 320px;animation:rise 14s linear infinite;-webkit-mask-image:linear-gradient(to top,#000,transparent 85%);mask-image:linear-gradient(to top,#000,transparent 85%)}
+:root[data-bg="embers"] body::after{background-size:380px 460px;animation-duration:22s;background-position:90px 0}
+:root[data-bg="embers"][data-dir="top"] body::before,:root[data-bg="embers"][data-dir="top"] body::after{-webkit-mask-image:linear-gradient(to top,#000 30%,transparent);mask-image:linear-gradient(to top,#000 30%,transparent)}
+@keyframes rise{to{background-position-y:-920px}}
+:root[data-font="mono"]{--display:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;--body:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace}
+:root[data-font="mono"] body::after{content:"";position:fixed;inset:0;z-index:2147483000;pointer-events:none;background:repeating-linear-gradient(rgb(0 0 0 / .07) 0 1px,transparent 1px 3px)}
+/* easter-egg effects */
+.fx{position:fixed;inset:0;pointer-events:none;z-index:2147483100;overflow:hidden}
+.fx i{position:absolute;top:-30px;width:var(--w,10px);height:var(--w,10px);border-radius:2px;background:var(--c);animation:fall var(--t,2.6s) cubic-bezier(.3,.1,.6,1) forwards;animation-delay:var(--d,0s)}
+@keyframes fall{to{transform:translate(var(--x,0),110vh) rotate(var(--r,540deg))}}
+.fx.rain i{width:2px;height:16px;border-radius:0;background:rgb(130 170 255 / .55);animation:drop .7s linear infinite;animation-delay:var(--d)}
+.fx.snow i{width:5px;height:5px;border-radius:1px;background:rgb(255 255 255 / .85);animation:drop var(--t,7s) linear infinite;animation-delay:var(--d)}
+@keyframes drop{from{transform:translateY(-20px)}to{transform:translate(var(--x,0),105vh)}}
+.brand.spin .mark{animation:bspin .9s cubic-bezier(.3,1.4,.5,1)}
+@keyframes bspin{to{transform:rotate(1turn) scale(1)}}
+.ttile.secret small::before{content:"\2605 ";}
 .app{min-height:calc(100vh / var(--ui-zoom,1))}
 .side{height:calc(100vh / var(--ui-zoom,1))}
 .modal{max-height:calc(92vh / var(--ui-zoom,1))}
@@ -6130,8 +6188,8 @@ async function search() {
     $("#results").innerHTML = `<div class="banner err"><div class="grow"><b>Search didn't work</b><p>${esc(e.message)}</p></div></div>`;
   }
 }
-$("#q").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(search, 350); });
-$("#q").addEventListener("keydown", e => { if (e.key === "Enter") { clearTimeout(searchTimer); search(); } });
+$("#q").addEventListener("input", () => { clearTimeout(searchTimer); if ($("#q").value.trim().startsWith("/")) return; searchTimer = setTimeout(search, 350); });
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") { clearTimeout(searchTimer); if (runCommand($("#q").value)) { $("#q").value = ""; return; } search(); } });
 $("#searchLoader").onchange = search;
 
 /* ---------- modals ---------- */
@@ -7830,8 +7888,11 @@ function renderModPage(p, ctx) {
 }
 
 /* ---------- themes ---------- */
-const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["rose", "Rose", "#d62976"], ["violet", "Violet", "#7c3aed"], ["ocean", "Ocean", "#2563eb"], ["emerald", "Emerald", "#0e9e5a"], ["amber", "Amber", "#ca7008"]];
-const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "full"};
+const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["rose", "Rose", "#d62976"], ["violet", "Violet", "#7c3aed"], ["ocean", "Ocean", "#2563eb"], ["emerald", "Emerald", "#0e9e5a"], ["amber", "Amber", "#ca7008"],
+  ["sunset", "Sunset", "#f46220", "#db2777"], ["aurora", "Aurora", "#14b8a6", "#7c3aed"], ["nether", "Nether", "#e24216", "#8c1018"], ["ender", "The End", "#a855f7", "#401e8c"],
+  ["cherry", "Cherry", "#e25492", "#b02a68"], ["mint", "Mint", "#0ea674", "#067454"]];
+const SECRET_ACCENTS = [["lime", "Retro green", "#4ac440", "#228024"], ["rainbow", "Rainbow", "#7c3aed", "#ec4899"]];
+const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "full", font: "normal"};
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 function accentTriplets(hex) {
   const n = parseInt(hex.slice(1), 16), c = [n >> 16 & 255, n >> 8 & 255, n & 255];
@@ -7842,12 +7903,17 @@ function applyTheme(t, animate = false) {
   t = {...THEME_DEFAULT, ...t};
   const d = document.documentElement;
   if (animate && !REDUCED) { d.classList.add("theming"); setTimeout(() => d.classList.remove("theming"), 420); }
-  Object.assign(d.dataset, {pref: t.mode, accent: t.accent, bg: t.bg, dir: t.dir, radius: t.radius, side: t.side, motion: t.motion});
+  Object.assign(d.dataset, {pref: t.mode, accent: t.accent, bg: t.bg, dir: t.dir, radius: t.radius, side: t.side, motion: t.motion, font: t.font || "normal"});
   d.dataset.mode = t.mode === "system" ? (lightQuery.matches ? "light" : "dark") : t.mode;
   d.style.setProperty("--bgk", (t.strength / 100).toFixed(2));
   d.style.setProperty("--ui-zoom", (+t.size / 100).toFixed(2));
   if (t.accent === "custom") { const [a, b, c] = accentTriplets(t.custom); d.style.setProperty("--acc", a); d.style.setProperty("--acc2", b); d.style.setProperty("--acc3", c); }
   else ["--acc", "--acc2", "--acc3"].forEach(v => d.style.removeProperty(v));
+  clearInterval(window.rainbowTimer);
+  if (t.accent === "rainbow" && t.motion !== "off" && !motionQuery.matches) {
+    let h = 270; const hx = (h, l) => { const f = n => { const k = (n + h / 30) % 12, a = .62 * Math.min(l, 1 - l); return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); }; return `${f(0)} ${f(8)} ${f(4)}`; };
+    window.rainbowTimer = setInterval(() => { h = (h + 1.2) % 360; d.style.setProperty("--acc", hx(h, .52)); d.style.setProperty("--acc2", hx(h + 25, .62)); d.style.setProperty("--acc3", hx(h + 70, .42)); }, 60);
+  }
   REDUCED = motionQuery.matches || t.motion === "off";
   LESS = REDUCED || t.motion === "less";
   if (typeof settle === "function") { settle(); setTimeout(settle, 60); }
@@ -7857,7 +7923,7 @@ function renderTheme() {
   const t = {...THEME_DEFAULT, ...(S.theme || {})};
   $$("#themeMode button").forEach(b => { b.classList.toggle("on", b.dataset.mode === t.mode); b.setAttribute("aria-checked", b.dataset.mode === t.mode); });
   $$("[data-opt]").forEach(g => g.querySelectorAll("button").forEach(b => { const on = String(t[g.dataset.opt]) === b.dataset.v; b.classList.toggle("on", on); b.setAttribute("aria-checked", on); }));
-  $("#accentPick").innerHTML = ACCENTS.map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}" aria-label="${n}"><i></i></button>`).join("")
+  $("#accentPick").innerHTML = ACCENTS.concat(SECRET_ACCENTS.filter(x => (S.secrets || []).includes(x[0] === "lime" ? "retro" : x[0]))).map(([id, n, c]) => `<button class="sw ${id === t.accent ? "on" : ""}" data-accent="${id}" style="--sw:${c}" role="radio" aria-checked="${id === t.accent}" title="${n}" aria-label="${n}"><i></i></button>`).join("")
     + `<label class="sw custom ${t.accent === "custom" ? "on" : ""}" style="--sw:${t.custom}" title="Pick any colour"><i></i><input type="color" id="customColor" value="${t.custom}" aria-label="Pick any colour"></label>`;
   $$("#accentPick [data-accent]").forEach(b => b.onclick = () => setTheme({accent: b.dataset.accent}));
   const cc = $("#customColor");
@@ -7877,12 +7943,29 @@ const PRESETS = [
   {id: "amber", n: "Amber", m: "Dark, from the bottom", t: {mode: "dark", accent: "amber", bg: "gradient", dir: "bottom"}},
   {id: "midnight", n: "Midnight", m: "Dark, plain", t: {mode: "dark", accent: "crimson", bg: "plain", dir: "top"}},
   {id: "snow", n: "Snow", m: "Light, plain", t: {mode: "light", accent: "ocean", bg: "plain", dir: "top"}},
+  {id: "sunset", n: "Sunset", m: "Dark, orange to pink", t: {mode: "dark", accent: "sunset", bg: "vivid", dir: "corner"}},
+  {id: "aurora", n: "Aurora", m: "Dark, drifting lights", t: {mode: "dark", accent: "aurora", bg: "aurora", dir: "top"}},
+  {id: "nether", n: "Nether", m: "Dark, rising embers", t: {mode: "dark", accent: "nether", bg: "embers", dir: "bottom"}},
+  {id: "end", n: "The End", m: "Dark, twinkling stars", t: {mode: "dark", accent: "ender", bg: "stars", dir: "top"}},
+  {id: "deepsea", n: "Deep sea", m: "Dark, rising bubbles", t: {mode: "dark", accent: "ocean", bg: "embers", dir: "top"}},
+  {id: "cherry", n: "Cherry", m: "Light, blossom pink", t: {mode: "light", accent: "cherry", bg: "aurora", dir: "top"}},
+  {id: "mint", n: "Mint", m: "Light, fresh glow", t: {mode: "light", accent: "mint", bg: "glow", dir: "corner"}},
 ];
-const ACCENT_HEX = Object.fromEntries(ACCENTS.map(a => [a[0], a[2]]));
+const SECRET_PRESETS = {
+  rainbow: {id: "rainbow", n: "Rainbow", m: "Secret: every colour", t: {mode: "dark", accent: "rainbow", bg: "aurora", dir: "top"}},
+  retro: {id: "retro", n: "Retro", m: "Secret: old-school screen", t: {mode: "dark", accent: "lime", bg: "glow", dir: "corner", font: "mono"}},
+};
+const ACCENT_HEX = Object.fromEntries(ACCENTS.concat(SECRET_ACCENTS).map(a => [a[0], a[2]]));
+const ACCENT_HEX2 = Object.fromEntries(ACCENTS.concat(SECRET_ACCENTS).map(a => [a[0], a[3] || a[2]]));
 function tileBg(t, hex) {
   const dark = t.mode !== "light", base = dark ? "#0b0b0d" : "#f7f7f9", clear = dark ? "rgba(11,11,13,0)" : "rgba(247,247,249,0)";
   const deg = {top: "180deg", corner: "150deg", side: "90deg", bottom: "0deg"}[t.dir] || "180deg";
   const pos = {top: "50% 0%", corner: "0% 0%", side: "0% 50%", bottom: "50% 100%"}[t.dir] || "50% 0%";
+  const h2 = ACCENT_HEX2[t.accent] || hex;
+  if (t.accent === "rainbow") return `linear-gradient(135deg, #ef4444aa, #f59e0baa, #22c55eaa, #3b82f6aa, #a855f7aa), ${base}`;
+  if (t.bg === "aurora") return `radial-gradient(70% 80% at 15% 0%, ${hex}${dark ? "bb" : "77"}, ${clear} 70%), radial-gradient(70% 70% at 90% 20%, ${h2}${dark ? "aa" : "66"}, ${clear} 70%), ${base}`;
+  if (t.bg === "stars") return `radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent), radial-gradient(1.5px 1.5px at 70% 20%, #fff, transparent), radial-gradient(1px 1px at 45% 60%, #fff, transparent), radial-gradient(1.5px 1.5px at 85% 55%, #fff, transparent), radial-gradient(1px 1px at 30% 80%, #fff, transparent), radial-gradient(110% 80% at 50% 0%, ${hex}99, ${clear} 70%), radial-gradient(90% 70% at 100% 100%, ${h2}99, ${clear} 70%), ${base}`;
+  if (t.bg === "embers") return `radial-gradient(2px 2px at 20% 70%, ${hex}, transparent), radial-gradient(2px 2px at 60% 50%, ${hex}, transparent), radial-gradient(1.5px 1.5px at 80% 80%, ${hex}, transparent), radial-gradient(1.5px 1.5px at 40% 35%, ${hex}, transparent), linear-gradient(${t.dir === "top" ? "180deg" : "0deg"}, ${hex}aa, ${h2}55 45%, ${clear} 85%), ${base}`;
   if (t.bg === "plain") return base;
   if (t.bg === "glow") return `radial-gradient(130% 95% at ${pos}, ${hex}${dark ? "8c" : "5e"}, ${clear} 70%), ${base}`;
   if (t.bg === "vivid") return dark ? `linear-gradient(${deg}, ${hex}, ${hex}66 55%, ${base})` : `linear-gradient(${deg}, ${hex}bb, ${hex}33 60%, ${base})`;
@@ -7895,12 +7978,13 @@ function tileHtml(id, name, sub, t, hex, on, extra = "", tag = "button") {
 }
 function renderThemeTiles(t) {
   const resolved = t.mode;
-  const match = p => p.t.mode === resolved && p.t.accent === t.accent && p.t.bg === t.bg && (p.t.bg === "plain" || p.t.dir === t.dir);
+  const match = p => p.t.mode === resolved && p.t.accent === t.accent && p.t.bg === t.bg && (p.t.bg === "plain" || p.t.dir === t.dir) && (p.t.font || "normal") === (t.font || "normal");
+  const secrets = (S.secrets || []).map(k => SECRET_PRESETS[k]).filter(Boolean);
   const custom = t.accent === "custom";
-  $("#themeGrid").innerHTML = PRESETS.map(p => tileHtml(p.id, p.n, p.m, p.t, ACCENT_HEX[p.t.accent], !custom && match(p))).join("")
+  $("#themeGrid").innerHTML = PRESETS.concat(secrets).map(p => tileHtml(p.id, p.n, p.m, p.t, ACCENT_HEX[p.t.accent], !custom && match(p)).replace('class="ttile', SECRET_PRESETS[p.id] ? 'class="ttile secret' : 'class="ttile')).join("")
     + tileHtml("custom", "Your colour", custom ? "Click to change it" : "Any colour you pick", {mode: t.mode === "light" ? "light" : "dark", bg: t.bg === "plain" ? "gradient" : t.bg, dir: t.dir}, t.custom, custom,
       `<input type="color" id="customTile" value="${t.custom}" aria-label="Pick your colour">`, "label");
-  $$("#themeGrid button[data-preset]").forEach(b => b.onclick = () => { const p = PRESETS.find(x => x.id === b.dataset.preset); setTheme({...p.t}); });
+  $$("#themeGrid button[data-preset]").forEach(b => b.onclick = () => { const p = PRESETS.find(x => x.id === b.dataset.preset) || SECRET_PRESETS[b.dataset.preset]; setTheme({font: "normal", ...p.t}); });
   const ct = $("#customTile");
   ct.oninput = () => { S.theme = {...t, accent: "custom", custom: ct.value, bg: t.bg === "plain" ? "gradient" : t.bg}; applyTheme(S.theme); };
   ct.onchange = () => setTheme({accent: "custom", custom: ct.value, bg: t.bg === "plain" ? "gradient" : t.bg});
@@ -7939,6 +8023,77 @@ function renderAll() { renderTheme(); renderCrashes(); renderLoadouts(); renderC
   hideSplash();
   renderNotesDot();
 })();
+
+/* ---------- easter eggs ---------- */
+function fxLayer(cls, html, ms) {
+  const el = document.createElement("div"); el.className = "fx " + cls; el.setAttribute("aria-hidden", "true"); el.innerHTML = html;
+  document.body.appendChild(el); if (ms) setTimeout(() => el.remove(), ms); return el;
+}
+function blockParty(n = 90) {
+  if (REDUCED) return;
+  const cols = ["rgb(var(--acc))", "rgb(var(--acc2))", "#45b97c", "#f0a43a", "#7cb8ff", "#f3f1ef", "#8a5a3c"];
+  let h = "";
+  for (let i = 0; i < n; i++) h += `<i style="left:${Math.random() * 100}%;--w:${6 + Math.random() * 10 | 0}px;--c:${cols[i % cols.length]};--d:${(Math.random() * .7).toFixed(2)}s;--t:${(2 + Math.random() * 1.6).toFixed(2)}s;--x:${(Math.random() * 160 - 80) | 0}px;--r:${(Math.random() * 900 - 450) | 0}deg"></i>`;
+  fxLayer("party", h, 4200);
+}
+let weatherEl = null;
+function weather(kind, ms) {
+  if (weatherEl) { weatherEl.remove(); weatherEl = null; }
+  if (!kind || REDUCED) return;
+  let h = "";
+  const n = kind === "rain" ? 110 : 70;
+  for (let i = 0; i < n; i++) h += `<i style="left:${Math.random() * 100}%;--d:-${(Math.random() * (kind === "rain" ? .7 : 7)).toFixed(2)}s;--t:${(5 + Math.random() * 5).toFixed(1)}s;--x:${kind === "snow" ? (Math.random() * 80 - 40 | 0) : -30}px"></i>`;
+  weatherEl = fxLayer(kind, h, ms || 0);
+  if (ms) setTimeout(() => { weatherEl = null; }, ms);
+}
+async function unlockSecret(name, how) {
+  try {
+    const r = await api("/api/secret", {name});
+    S.secrets = r.secrets; renderTheme();
+    const title = {rainbow: "Rainbow", retro: "Retro"}[name];
+    toast(r.new ? `${how} You unlocked the ${title} theme. It's in Settings, under Appearance.` : `${how} You already have the ${title} theme.`);
+    return r.new;
+  } catch (e) { toast(e.message); }
+}
+function runCommand(raw) {
+  const c = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  if (!c.startsWith("/")) return false;
+  const say = m => toast(m);
+  if (c === "/time set night" || c === "/time set midnight") { setTheme({mode: "dark"}); say("Set the time to night."); }
+  else if (c === "/time set day" || c === "/time set noon") { setTheme({mode: "light"}); say("Set the time to day."); }
+  else if (c === "/weather rain" || c === "/weather thunder") { weather("rain", 20000); say("Changing to rainy weather."); }
+  else if (c === "/weather clear") { weather(null); say("Changing to clear weather."); }
+  else if (c === "/gamemode creative") { blockParty(); say("Set own game mode to Creative Mode."); }
+  else if (c === "/gamemode survival") { say("Set own game mode to Survival Mode. Your mods are still safe."); }
+  else if (c === "/gamemode spectator") { document.documentElement.animate([{opacity: 1}, {opacity: .35}, {opacity: 1}], {duration: 2200}); say("Set own game mode to Spectator Mode."); }
+  else if (c.startsWith("/give")) { blockParty(40); say("There are no diamonds here, but here are some blocks."); }
+  else if (c === "/kill" || c === "/kill @s") { say("ModHub fell out of the world. Just kidding, it's fine."); }
+  else if (c === "/seed") { say("Seed: [" + (Math.random() * 2 ** 53 | 0) * (Math.random() < .5 ? -1 : 1) + "]"); }
+  else if (c === "/help" || c === "/?") { say("Try /time set night, /weather rain, /gamemode creative, /seed and a few more you'll have to find."); }
+  else say(`Unknown command: ${raw.trim()}. Try /help.`);
+  return true;
+}
+// up, up, down, down, left, right, left, right, B, A
+(() => {
+  const code = ["ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a"]; let at = 0;
+  addEventListener("keydown", e => {
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    at = k === code[at] ? at + 1 : (k === code[0] ? 1 : 0);
+    if (at === code.length) { at = 0; blockParty(140); unlockSecret("rainbow", "Cheat code accepted!"); }
+  });
+})();
+// click the logo five times in a row
+(() => {
+  const b = $(".brand"); if (!b) return; let n = 0, t;
+  b.style.cursor = "default";
+  b.addEventListener("click", () => {
+    clearTimeout(t); t = setTimeout(() => n = 0, 1400);
+    b.classList.remove("spin"); void b.offsetWidth; b.classList.add("spin");
+    if (++n === 5) { n = 0; unlockSecret("retro", "Old-school mode found!"); }
+  });
+})();
+// a little snow at the end of the year
+(() => { const d = new Date(); if (d.getMonth() === 11 && d.getDate() >= 20) setTimeout(() => weather("snow", 30000), 2500); })();
 </script>
 </body>
 </html>
