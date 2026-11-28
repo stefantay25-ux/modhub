@@ -39,7 +39,8 @@ def main():
     if args and args[0].lower().endswith(".py") and Path(args[0]).is_file():
         script, args = Path(args[0]), args[1:]  # ModHub starting another copy of itself
     else:
-        if not app.exists() or not works(app) or version_of(bundled) > version_of(app):
+        pinned = (app.parent / "keep-version").exists()  # a version picked in ModHub's developer options
+        if not app.exists() or not works(app) or (version_of(bundled) > version_of(app) and not pinned):
             app.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bundled, app)
         script = app

@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0.5"
+APP_VERSION = "4.0.6"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -2282,7 +2282,7 @@ LIVE_BUCKET = 300
 
 
 def live_loop():
-    sent = None
+    sent, sent_periods = None, set()
     time.sleep(20)
     while True:
         try:
@@ -2293,6 +2293,12 @@ def live_loop():
                 req = urllib.request.Request(f"{LIVE_URL}/hit/{LIVE_NS}/live-{b}", headers={"User-Agent": USER_AGENT})
                 urllib.request.urlopen(req, timeout=15).read(200)
                 sent = b
+                for key, period in (("hour", 3600), ("day", 86400)):
+                    k = f"{key}-{int(time.time() // period)}"
+                    if k not in sent_periods:
+                        req = urllib.request.Request(f"{LIVE_URL}/hit/{LIVE_NS}/{k}", headers={"User-Agent": USER_AGENT})
+                        urllib.request.urlopen(req, timeout=15).read(200)
+                        sent_periods.add(k)
         except Exception:
             pass
         time.sleep(60)
@@ -2300,8 +2306,8 @@ def live_loop():
 
 def dev_stats():
     with CFG_LOCK:
-        if not CFG.get("dev_mode"):
-            raise UserError("Developer mode is off.")
+        if not dev_on("stats"):
+            raise UserError("That developer option is off.")
     from concurrent.futures import ThreadPoolExecutor
     now = int(time.time() // LIVE_BUCKET)
 
@@ -2325,6 +2331,237 @@ def dev_stats():
     live = max([h for h in hist[-2:] if h is not None] or [0])
     return {"live": live, "history": hist, "downloads": downloads, "latest": latest, "reachable": any(h is not None for h in hist),
             "at": now_iso()}
+
+
+# =========================================================================== #
+# Developer options (only after the developer code, each one switchable)
+# =========================================================================== #
+DEV_FEATURES = {"stats": True, "downloads": True, "history": True, "beta": False, "versions": True,
+                "previews": True, "announce": True, "debug": True}
+REPO = "stefantay25-ux/modhub"
+NOTICE_URL = f"https://raw.githubusercontent.com/{REPO}/main/notice.json"
+PIN_FILE = DATA_DIR / "app" / "keep-version"
+
+
+def dev_features(cfg=None):
+    cfg = CFG if cfg is None else cfg
+    got = cfg.get("dev_features") if isinstance(cfg.get("dev_features"), dict) else {}
+    return {k: bool(got.get(k, v)) for k, v in DEV_FEATURES.items()}
+
+
+def dev_on(name, cfg=None):
+    cfg = CFG if cfg is None else cfg
+    return bool(cfg.get("dev_mode")) and dev_features(cfg).get(name, False)
+
+
+def _need_dev(name):
+    with CFG_LOCK:
+        if not dev_on(name):
+            raise UserError("That developer option is off.")
+
+
+def _gh(path, method="GET", body=None, token=None):
+    hdrs = {"Accept": "application/vnd.github+json"}
+    if token:
+        hdrs["Authorization"] = f"Bearer {token}"
+    return http_json(method, f"https://api.github.com/{path}", body, headers=hdrs)
+
+
+def _abacus(key):
+    try:
+        req = urllib.request.Request(f"{LIVE_URL}/get/{LIVE_NS}/{key}", headers={"User-Agent": USER_AGENT})
+        return json.loads(urllib.request.urlopen(req, timeout=10).read(500)).get("value", 0)
+    except urllib.error.HTTPError as e:
+        return 0 if e.code == 404 else None
+    except Exception:
+        return None
+
+
+def dev_history(view):
+    _need_dev("history")
+    from concurrent.futures import ThreadPoolExecutor
+    now = time.time()
+    if view == "week":
+        keys = [f"day-{int(now // 86400) - i}" for i in range(6, -1, -1)]
+        labels = [datetime.fromtimestamp((int(now // 86400) - i) * 86400, timezone.utc).strftime("%a") for i in range(6, -1, -1)]
+    elif view == "day":
+        keys = [f"hour-{int(now // 3600) - i}" for i in range(23, -1, -1)]
+        labels = [datetime.fromtimestamp((int(now // 3600) - i) * 3600).strftime("%H:00") for i in range(23, -1, -1)]
+    else:
+        keys = [f"live-{int(now // LIVE_BUCKET) - i}" for i in range(12, -1, -1)]
+        labels = [datetime.fromtimestamp((int(now // LIVE_BUCKET) - i) * LIVE_BUCKET).strftime("%H:%M") for i in range(12, -1, -1)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        values = list(pool.map(_abacus, keys))
+    return {"view": view, "values": values, "labels": labels, "reachable": any(v is not None for v in values)}
+
+
+def dev_downloads():
+    _need_dev("downloads")
+    rels = _gh(f"repos/{REPO}/releases?per_page=100") or []
+    kinds = {"ModHub.exe": "windows", "ModHub-mac.zip": "mac", "ModHub-mac-intel.zip": "mac", "ModHub-linux.tar.gz": "linux"}
+    total = {"windows": 0, "mac": 0, "linux": 0}
+    rows = []
+    for r in rels:
+        row = {"version": r.get("tag_name", "").lstrip("v"), "windows": 0, "mac": 0, "linux": 0}
+        for a in r.get("assets") or []:
+            k = kinds.get(a.get("name"))
+            if k:
+                row[k] += a.get("download_count", 0)
+                total[k] += a.get("download_count", 0)
+        rows.append(row)
+    return {"total": total, "all": sum(total.values()), "versions": rows[:12]}
+
+
+def dev_versions():
+    _need_dev("versions")
+    commits = _gh(f"repos/{REPO}/commits?path=modhub.py&per_page=100") or []
+    seen, out = set(), []
+    for c in commits:
+        m = re.match(r"ModHub (\d+(?:\.\d+)+)\b", (c.get("commit") or {}).get("message", ""))
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append({"version": m.group(1), "sha": c["sha"], "date": ((c.get("commit") or {}).get("author") or {}).get("date", "")[:10]})
+    return {"versions": out, "current": APP_VERSION, "pinned": PIN_FILE.exists()}
+
+
+def dev_install_version_job(job, sha, version):
+    _need_dev("versions")
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
+        raise UserError("Pick a version from the list.")
+    job.log(f"Downloading ModHub {version}...")
+    req = urllib.request.Request(f"https://raw.githubusercontent.com/{REPO}/{sha}/modhub.py", headers={"User-Agent": USER_AGENT})
+    data = urllib.request.urlopen(req, timeout=30).read(5_000_001)
+    if len(data) > 5_000_000:
+        raise UserError("That file is too big to be ModHub.")
+    UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = UPDATES_DIR / "picked.tmp"
+    tmp.write_bytes(data)
+    got = read_update_file(tmp)
+    if not got:
+        tmp.unlink()
+        raise UserError("That version couldn't be read.")
+    older = version_tuple(got[0]) < version_tuple(APP_VERSION)
+    apply_update(str(tmp), allow_older=True)
+    try:  # keep this version: the ModHub app won't swap it for the version it carries
+        PIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if older:
+            PIN_FILE.write_text(got[0], "utf-8")
+        elif PIN_FILE.exists():
+            PIN_FILE.unlink()
+    except OSError:
+        pass
+    for f in UPDATES_DIR.glob("modhub-*.py"):  # drop downloaded updates so they don't replace it straight away
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    job.log(f"Installed ModHub {got[0]}. Restarting...")
+    threading.Timer(1.5, restart_app).start()
+    return {"version": got[0], "older": older}
+
+
+def _redacted_config():
+    with CFG_LOCK:
+        cfg = json.loads(json.dumps({k: v for k, v in CFG.items() if k != "favorites"}))
+    if cfg.get("dev_github_token"):
+        cfg["dev_github_token"] = "(hidden)"
+    return cfg
+
+
+def dev_debug(action):
+    _need_dev("debug")
+    if action == "log":
+        return {"text": log_tail(400) or "The log is empty."}
+    if action == "config":
+        return {"text": json.dumps(_redacted_config(), indent=2)}
+    if action == "clear":
+        for c in (DISCOVER_CACHE, _PERF_CACHE, _SHADER_LOADER_CACHE):
+            c.clear()
+        UPDATE_CACHE.update(at=0, found=None)
+        VERSIONS_CACHE.update(list=None)
+        return {"text": "Cleared ModHub's caches. Fresh data loads the next time it's needed."}
+    if action == "replay":
+        with CFG_LOCK:
+            for k in ("native_prompt_dismissed", "shortcut_done", "seen_newest", "mod_updates"):
+                CFG.pop(k, None)
+            save_config(CFG)
+        return {"text": "First-run screens and prompts will show again."}
+    raise UserError("Unknown debug action.")
+
+
+# ---- announcements: a small file on GitHub that every copy of ModHub reads ----
+def fetch_notice():
+    try:
+        req = urllib.request.Request(NOTICE_URL + f"?t={int(time.time() // 300)}", headers={"User-Agent": USER_AGENT})
+        raw = json.loads(urllib.request.urlopen(req, timeout=15).read(20_000))
+    except urllib.error.HTTPError as e:
+        raw = {} if e.code == 404 else None
+    except Exception:
+        raw = None
+    if raw is None:
+        return
+    notice = None
+    if isinstance(raw, dict) and isinstance(raw.get("text"), str) and raw["text"].strip() and isinstance(raw.get("id"), str):
+        link = raw.get("link") if isinstance(raw.get("link"), str) and raw["link"].startswith("https://") else ""
+        notice = {"id": raw["id"][:40], "text": raw["text"].strip()[:280], "link": link[:300],
+                  "until": raw.get("until") if isinstance(raw.get("until"), str) else ""}
+    with CFG_LOCK:
+        if CFG.get("notice") != notice:
+            CFG["notice"] = notice
+            save_config(CFG)
+
+
+def current_notice(cfg):
+    n = cfg.get("notice")
+    if not isinstance(n, dict) or n.get("id") in (cfg.get("notices_dismissed") or []):
+        return None
+    if n.get("until") and n["until"] < now_iso()[:10]:
+        return None
+    return n
+
+
+def notice_watch():
+    time.sleep(15)
+    while True:
+        try:
+            fetch_notice()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(30 * 60)
+
+
+def dev_publish_notice(text, link, until, token):
+    _need_dev("announce")
+    import base64
+    with CFG_LOCK:
+        if token:
+            CFG["dev_github_token"] = token.strip()
+            save_config(CFG)
+        token = CFG.get("dev_github_token")
+    if not token:
+        raise UserError("Add your GitHub access token first.")
+    text = (text or "").strip()[:280]
+    link = (link or "").strip()
+    if link and not link.startswith("https://"):
+        raise UserError("Links need to start with https://")
+    body = {"id": uuid.uuid4().hex[:10], "text": text, "link": link[:300], "until": (until or "")[:10]} if text else {"id": "none", "text": ""}
+    path = f"repos/{REPO}/contents/notice.json"
+    try:
+        sha = (_gh(path, token=token) or {}).get("sha")
+    except Exception:
+        sha = None
+    req = {"message": "Announcement" if text else "Remove announcement",
+           "content": base64.b64encode(json.dumps(body, indent=2).encode()).decode()}
+    if sha:
+        req["sha"] = sha
+    try:
+        _gh(path, "PUT", req, token=token)
+    except Exception as e:
+        raise UserError(f"GitHub didn't accept it ({e}). Check the token has Contents: Read and write for the modhub repo.")
+    with CFG_LOCK:
+        CFG["notice"] = {k: body.get(k, "") for k in ("id", "text", "link", "until")} if text else None
+        save_config(CFG)
+    return {"ok": True, "notice": CFG["notice"]}
 
 
 def save_library_backup():
@@ -3668,6 +3905,8 @@ def check_online_update():
     UPDATE_LAST["t"] = time.time()
     with CFG_LOCK:
         url = update_source_url(current_update_source())
+        if url and dev_on("beta"):  # developer's beta channel: test versions from the beta branch first
+            url = url.replace("/main/modhub.py", "/beta/modhub.py")
     if not url:
         return None
     result = {"at": now_iso()}
@@ -3748,13 +3987,13 @@ def apply_staged_update_on_start():
     return True
 
 
-def apply_update(path_str):
+def apply_update(path_str, allow_older=False):
     src = Path(os.path.expandvars(os.path.expanduser((path_str or "").strip().strip('"'))))
     got = read_update_file(src)
     if not got:
         raise UserError("That file isn't a working copy of ModHub. Download modhub.py again and try once more.")
     new_version, text = got
-    if version_tuple(new_version) < version_tuple(APP_VERSION):
+    if version_tuple(new_version) < version_tuple(APP_VERSION) and not allow_older:
         raise UserError(f"That file is an older version ({new_version}). You're on {APP_VERSION}.")
     me = Path(__file__).resolve()
     backups = DATA_DIR / "backups"
@@ -3922,7 +4161,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "mod_updates": cfg.get("mod_updates"), "live_ping": cfg.get("live_ping"), "dev_mode": bool(cfg.get("dev_mode")), "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "os": platform.system(), "app_switch": app_switch_state(),
+            "mod_updates": cfg.get("mod_updates"), "live_ping": cfg.get("live_ping"), "dev_mode": bool(cfg.get("dev_mode")), "dev_features": dev_features(cfg) if cfg.get("dev_mode") else {}, "notice": current_notice(cfg), "dev_has_token": bool(cfg.get("dev_github_token")), "pinned": PIN_FILE.exists(), "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "os": platform.system(), "app_switch": app_switch_state(),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -4125,8 +4364,48 @@ def api(path, body):
     if path == "/api/dev/leave":
         with CFG_LOCK:
             CFG["dev_mode"] = False
+            CFG["dev_features"] = {**dev_features(), "beta": False}
             save_config(CFG)
+        UPDATE_WAKE.set()
         return {"dev_mode": False}
+    if path == "/api/dev/features":
+        with CFG_LOCK:
+            if not CFG.get("dev_mode"):
+                raise UserError("Developer mode is off.")
+            f = dev_features()
+            for k, v in (body.get("set") or {}).items():
+                if k in DEV_FEATURES:
+                    f[k] = bool(v)
+            CFG["dev_features"] = f
+            save_config(CFG)
+        if "beta" in (body.get("set") or {}):
+            UPDATE_WAKE.set()  # look at the right channel straight away
+        return {"dev_features": f}
+    if path == "/api/dev/history":
+        return dev_history(body.get("view") if body.get("view") in ("hour", "day", "week") else "hour")
+    if path == "/api/dev/downloads":
+        return dev_downloads()
+    if path == "/api/dev/versions":
+        return dev_versions()
+    if path == "/api/dev/versions/install":
+        _need_dev("versions")
+        return {"job": start_job(dev_install_version_job, str(body.get("sha") or ""), str(body.get("version") or ""))}
+    if path == "/api/dev/versions/unpin":
+        _need_dev("versions")
+        if PIN_FILE.exists():
+            PIN_FILE.unlink()
+        return {"pinned": False}
+    if path == "/api/dev/debug":
+        return dev_debug(body.get("action"))
+    if path == "/api/dev/notice":
+        return dev_publish_notice(body.get("text"), body.get("link"), body.get("until"), body.get("token"))
+    if path == "/api/notice/dismiss":
+        with CFG_LOCK:
+            n = CFG.get("notice") or {}
+            if n.get("id"):
+                CFG["notices_dismissed"] = (CFG.get("notices_dismissed") or [])[-20:] + [n["id"]]
+                save_config(CFG)
+        return {"notice": None}
     if path == "/api/secret/dev":
         code = body.get("code")
         time.sleep(0.6)  # keeps guessing slow
@@ -5225,6 +5504,7 @@ def main():
     threading.Thread(target=precheck_watch, daemon=True).start()
     threading.Thread(target=mod_updates_watch, daemon=True).start()
     threading.Thread(target=live_loop, daemon=True).start()
+    threading.Thread(target=notice_watch, daemon=True).start()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PREFERRED_PORT
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -6280,6 +6560,29 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 .dev-spark{display:flex;align-items:flex-end;gap:4px;height:54px;margin-bottom:8px}
 .dev-spark i{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.8}
 .dev-spark i.gap{background:rgb(var(--hi) / .1)}
+
+/* ================= developer options ================= */
+.dev-switches{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px 14px;margin:4px 0 6px;padding:12px 14px;border-radius:12px;background:rgb(var(--hi) / .03);border:1px solid rgb(var(--hi) / .06)}
+.dev-switches label{display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer}
+.dev-sec{margin-top:18px;padding-top:16px;border-top:1px solid rgb(var(--hi) / .06)}
+.dev-sec h4{margin:0 0 4px;font:700 15px/1.2 var(--display);display:flex;align-items:center;gap:10px}
+.dev-sec h4 .seg{margin-left:auto}
+.dev-sec .help{margin:2px 0 10px}
+.dev-table{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+.dev-table th,.dev-table td{text-align:right;padding:6px 8px;border-bottom:1px solid rgb(var(--hi) / .06)}
+.dev-table th:first-child,.dev-table td:first-child{text-align:left}
+.dev-table th{color:var(--muted);font-weight:600}
+.dev-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.dev-row select,.dev-row input{min-width:0}
+.dev-out{white-space:pre-wrap;background:var(--deep);padding:12px 14px;border-radius:10px;font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--muted);max-height:320px;overflow:auto;margin-top:10px}
+.dev-form{display:grid;gap:8px}
+.dev-form textarea{width:100%;border-radius:10px;border:1px solid var(--edge);background:var(--deep);color:var(--text);padding:10px;font:inherit;resize:vertical}
+.dev-spark{height:64px}
+.dev-labels{display:flex;justify-content:space-between;font-size:11.5px;color:var(--faint);margin-top:4px}
+.notice{display:flex;align-items:center;gap:14px;padding:14px 18px;margin:0 0 22px;border-radius:14px;background:var(--accent-tint);border:1px solid var(--accent-edge)}
+.notice .ni{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);flex:none}
+.notice .grow{flex:1;min-width:0;font-size:14.5px}
+.notice.preview{outline:2px dashed var(--accent-edge);outline-offset:3px}
 </style>
 </head>
 <body>
@@ -6325,6 +6628,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
       <button class="btn go" id="newVerGo"></button>
       <button class="btn quiet" id="newVerLater">Not now</button>
     </div>
+    <div id="noticeBox"></div>
     <div id="crashBox"></div>
     <div id="catchUp"></div>
     <!-- LIBRARY -->
@@ -6559,15 +6863,10 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
           </div>
         </section>
         <section class="card hidden" id="devCard">
-          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><div><h3>Developer</h3><p>Only you can see this. It's here because you entered your developer code.</p></div></div>
-          <div class="dev-stats">
-            <div><span class="dev-n" id="devLive">-</span><span class="dev-l">using ModHub right now</span></div>
-            <div><span class="dev-n" id="devDl">-</span><span class="dev-l">downloads, all versions</span></div>
-            <div><span class="dev-n" id="devLatest">-</span><span class="dev-l" id="devLatestL">downloads of the newest version</span></div>
-          </div>
-          <div class="dev-spark" id="devSpark" aria-label="People using ModHub over the last hour"></div>
-          <p class="help" id="devNote"></p>
-          <div class="actions"><button class="btn" id="devRefresh">Refresh</button><button class="btn quiet" id="devLeave">Leave developer mode</button></div>
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><div><h3>Developer</h3><p>Only you can see this. Turn each option on or off, or leave developer mode any time.</p></div></div>
+          <div class="dev-switches" id="devSwitches"></div>
+          <div id="devBody"></div>
+          <div class="actions" style="margin-top:14px"><button class="btn quiet" id="devLeave">Leave developer mode</button></div>
         </section>
         <section class="card">
           <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg></span><div><h3>Your library</h3><p>Save all your loadouts and the files you added yourself in one backup file. Restore it on another PC or after a reinstall, or drag a backup onto ModHub.</p></div></div>
@@ -9079,29 +9378,123 @@ function showSharePreview(p) {
   };
 }
 
-/* ---------- 4.0: developer stats ---------- */
-let devTimer = null;
+
+/* ---------- announcements (everyone) ---------- */
+function renderNotice(n, preview) {
+  n = n || (S && S.notice);
+  const box = $("#noticeBox"); if (!box) return;
+  if (!n || !n.text) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="notice ${preview ? "preview" : ""}" role="status"><span class="ni"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg></span>
+    <div class="grow">${esc(n.text)}${preview ? ` <b style="color:var(--muted)">(preview, only you can see this)</b>` : ""}</div>
+    ${safeUrl(n.link) ? `<a class="btn sm" href="${esc(n.link)}" target="_blank" rel="noopener">Learn more</a>` : ""}<button class="btn sm quiet" id="noticeX">${preview ? "Close preview" : "Dismiss"}</button></div>`;
+  $("#noticeX").onclick = async () => { if (!preview) { await api("/api/notice/dismiss").catch(() => {}); S.notice = null; } renderNotice(); };
+}
+
+/* ---------- developer options ---------- */
+const DEV_LABELS = {stats: "Live stats", history: "Longer live history", downloads: "Download breakdown", beta: "Beta channel",
+                    versions: "Version picker", previews: "Previews", announce: "Announcements", debug: "Debug tools"};
+let devTimer = null, devView = "hour";
 function renderDev() {
   const card = $("#devCard"); if (!card || !S) return;
   card.classList.toggle("hidden", !S.dev_mode);
   clearInterval(devTimer);
-  if (S.dev_mode) { loadDev(); devTimer = setInterval(() => { if (!$("#tab-settings").classList.contains("hidden")) loadDev(); }, 60000); }
+  renderNotice();
+  if (!S.dev_mode) return;
+  const f = S.dev_features || {};
+  $("#devSwitches").innerHTML = Object.entries(DEV_LABELS).map(([k, l]) => `<label><input type="checkbox" data-devf="${k}" ${f[k] ? "checked" : ""}> ${l}</label>`).join("");
+  $$("#devSwitches [data-devf]").forEach(c => c.onchange = async () => {
+    try { S.dev_features = (await api("/api/dev/features", {set: {[c.dataset.devf]: c.checked}})).dev_features; renderDev();
+      if (c.dataset.devf === "beta") toast(c.checked ? "Beta channel on. ModHub now gets test versions from the beta branch." : "Beta channel off. Back to public updates."); }
+    catch (e) { toast(e.message); }
+  });
+  const sec = (k, title, inner) => f[k] ? `<div class="dev-sec" id="dev-${k}"><h4>${title}</h4>${inner}</div>` : "";
+  const versions = (S.changelog || []).map(e => e.version);
+  $("#devBody").innerHTML =
+    sec("stats", `Live${f.history ? `<div class="seg" role="tablist"><button data-dv="hour" class="${devView === "hour" ? "on" : ""}">Hour</button><button data-dv="day" class="${devView === "day" ? "on" : ""}">Day</button><button data-dv="week" class="${devView === "week" ? "on" : ""}">Week</button></div>` : ""}`,
+      `<div class="dev-stats"><div><span class="dev-n" id="devLive">-</span><span class="dev-l">using ModHub right now</span></div><div><span class="dev-n" id="devDl">-</span><span class="dev-l">downloads, all versions</span></div><div><span class="dev-n" id="devLatest">-</span><span class="dev-l" id="devLatestL">downloads of the newest version</span></div></div>
+       <div class="dev-spark" id="devSpark"></div><div class="dev-labels" id="devLabels"></div><p class="help" id="devNote"></p>`)
+    + sec("downloads", "Downloads by platform", `<div id="devDls"><p class="help"><span class="spin"></span> Loading...</p></div>`)
+    + sec("beta", "Beta channel", `<p class="help">Your copy checks the <b>beta</b> branch on GitHub for test versions, so you get them before anyone else. ${S.update_last_check ? `Last check: ${esc(S.update_last_check.status === "error" ? "didn't work (" + S.update_last_check.message + ")" : S.update_last_check.status === "downloaded" ? "downloaded " + S.update_last_check.version : "up to date")}.` : ""}</p><div class="dev-row"><button class="btn" id="devBetaCheck">Check the beta branch now</button></div>`)
+    + sec("versions", "Version picker", `<p class="help">Install any version of ModHub. ModHub restarts on it.${S.pinned ? " <b>You're on a version you picked</b>, so the ModHub app won't swap it for its own." : ""}</p><div class="dev-row"><select id="devVerSel"><option>Loading...</option></select><button class="btn go" id="devVerGo">Install</button>${S.pinned ? `<button class="btn quiet" id="devUnpin">Back to normal updates</button>` : ""}</div><p class="help" id="devVerNote"></p>`)
+    + sec("previews", "Previews", `<p class="help">See what players see. These only show on your screen and change nothing.</p><div class="dev-row"><select id="devPvVer">${versions.map(v => `<option>${esc(v)}</option>`).join("")}</select><button class="btn" id="pvWn">What's new</button><button class="btn" id="pvFix">Fix banner</button><button class="btn" id="pvMc">New Minecraft version</button><button class="btn" id="pvUpd">Mod updates</button><button class="btn" id="pvNotice">Announcement</button></div>`)
+    + sec("announce", "Announcement", `<p class="help">Shows at the top of everyone's ModHub within about 30 minutes, until they dismiss it.${S.notice ? ` Live now: "${esc(S.notice.text)}"` : ""}</p>
+       <div class="dev-form"><textarea id="anText" rows="2" maxlength="280" placeholder="Minecraft 26.5 support is coming this week!"></textarea>
+       <div class="dev-row"><input id="anLink" placeholder="Link (optional, https://...)" style="flex:1"><label class="help" style="margin:0">Hide after <input type="date" id="anUntil"></label></div>
+       ${S.dev_has_token ? `<p class="help" style="margin:0">GitHub access is set up. <button class="linkbtn" id="anTokChange">Change token</button></p><input id="anToken" type="password" class="hidden" placeholder="New GitHub token">` : `<input id="anToken" type="password" placeholder="GitHub access token (needed once)">`}
+       <div class="dev-row"><button class="btn" id="anPreview">Preview here</button><button class="btn go" id="anPublish">Publish to everyone</button>${S.notice ? `<button class="btn quiet" id="anRemove">Remove the live one</button>` : ""}</div><p class="help" id="anOut"></p></div>`)
+    + sec("debug", "Debug tools", `<div class="dev-row"><button class="btn" data-dbg="log">Show log</button><button class="btn" data-dbg="config">Show settings file</button><button class="btn" data-dbg="clear">Clear caches</button><button class="btn" data-dbg="replay">Replay first-run screens</button></div><pre class="dev-out hidden" id="dbgOut"></pre>`);
+  wireDev();
 }
+function wireDev() {
+  const f = S.dev_features || {};
+  if (f.stats) { loadDev(); devTimer = setInterval(() => { if (!$("#tab-settings").classList.contains("hidden")) loadDev(); }, 60000); }
+  $$("[data-dv]").forEach(b => b.onclick = () => { devView = b.dataset.dv; $$("[data-dv]").forEach(x => x.classList.toggle("on", x === b)); loadDev(); });
+  if (f.downloads) api("/api/dev/downloads").then(d => {
+    const n = x => Number(x).toLocaleString();
+    $("#devDls").innerHTML = `<table class="dev-table"><tr><th>Version</th><th>Windows</th><th>Mac</th><th>Linux</th><th>Total</th></tr>`
+      + d.versions.map(r => `<tr><td>${esc(r.version)}</td><td>${n(r.windows)}</td><td>${n(r.mac)}</td><td>${n(r.linux)}</td><td>${n(r.windows + r.mac + r.linux)}</td></tr>`).join("")
+      + `<tr><th>All versions</th><th>${n(d.total.windows)}</th><th>${n(d.total.mac)}</th><th>${n(d.total.linux)}</th><th>${n(d.all)}</th></tr></table>`;
+  }).catch(e => { $("#devDls").innerHTML = `<p class="help">${esc(e.message)}</p>`; });
+  if ($("#devBetaCheck")) $("#devBetaCheck").onclick = async () => { try { const r = await api("/api/update/check"); S.update = r.update; if (r.update_last_check) S.update_last_check = r.update_last_check; renderUpdateBits(); renderDev(); toast(r.update ? `ModHub ${r.update.version} is ready to install` : "No newer version on the beta branch"); } catch (e) { toast(e.message); } };
+  if (f.versions) api("/api/dev/versions").then(d => {
+    $("#devVerSel").innerHTML = d.versions.map(v => `<option value="${esc(v.sha)}" data-v="${esc(v.version)}" ${v.version === d.current ? "selected" : ""}>ModHub ${esc(v.version)}${v.version === d.current ? " (current)" : ""}, ${esc(v.date)}</option>`).join("");
+  }).catch(e => { $("#devVerNote").textContent = e.message; });
+  if ($("#devVerGo")) $("#devVerGo").onclick = async () => {
+    const o = $("#devVerSel").selectedOptions[0]; if (!o || !o.value) return;
+    if (!confirmDanger(`Install ModHub ${o.dataset.v}? ModHub restarts on it.`)) return;
+    $("#devVerNote").innerHTML = `<span class="spin"></span> Installing ModHub ${esc(o.dataset.v)}...`;
+    try { await follow((await api("/api/dev/versions/install", {sha: o.value, version: o.dataset.v})).job);
+      document.body.innerHTML = `<main style="padding:60px"><h1>Switching to ModHub ${esc(o.dataset.v)}</h1><p class="lede">ModHub reopens in a moment. You can close this window.</p></main>`;
+      setTimeout(() => window.close(), 2000);
+    } catch (e) { $("#devVerNote").textContent = e.message; }
+  };
+  if ($("#devUnpin")) $("#devUnpin").onclick = async () => { await api("/api/dev/versions/unpin"); S.pinned = false; await api("/api/update/check").catch(() => {}); toast("Back to normal updates. The newest version installs next time you open ModHub."); renderDev(); };
+  if ($("#pvWn")) {
+    $("#pvWn").onclick = () => { const v = $("#devPvVer").value, i = (S.changelog || []).findIndex(e => e.version === v), prev = (S.changelog[i + 1] || {}).version || v; showJustUpdated({from: prev, to: v}); };
+    $("#pvFix").onclick = () => { S.crashes = (S.crashes || []).concat([{id: "preview", install_id: "preview", kind: "precheck", instance: "Preview instance", at: new Date().toISOString(), file: "", autofix: {status: "fixed", fixed: ["Turned off the extra copy of Sodium, kept sodium-26.4.jar.", "Added Fabric API."], still: []}}]); renderCrashes(); go("home"); window.scrollTo(0, 0); setTimeout(() => { S.crashes = S.crashes.filter(c => c.id !== "preview"); }, 100); };
+    $("#pvMc").onclick = () => { const was = S.new_version; S.new_version = "99.1"; renderNewVersion(); go("home"); window.scrollTo(0, 0); setTimeout(() => { S.new_version = was; }, 100); toast("Showing a pretend Minecraft 99.1. It goes away when you refresh."); };
+    $("#pvUpd").onclick = () => { const was = S.mod_updates; S.mod_updates = {at: new Date().toISOString(), items: [{instance: "x", instance_name: "Preview instance", version: "26.4", name: "Sodium", icon: "", from: "0.9.2", to: "0.9.3", changelog: "Fixes a crash in the Nether.\nAbout 15% more FPS in caves."}, {instance: "x", instance_name: "Preview instance", version: "26.4", name: "Iris Shaders", icon: "", from: "1.11.7", to: "1.12.1", changelog: "Better shadows."}]}; go("home"); renderHome(); openModUpdates(); setTimeout(() => { S.mod_updates = was; }, 200); };
+    $("#pvNotice").onclick = () => { renderNotice({text: ($("#anText") && $("#anText").value.trim()) || "This is how an announcement looks.", link: ($("#anLink") && $("#anLink").value.trim()) || ""}, true); go("home"); window.scrollTo(0, 0); };
+  }
+  if ($("#anPreview")) {
+    $("#anPreview").onclick = () => { const t = $("#anText").value.trim(); if (!t) return $("#anText").focus(); renderNotice({text: t, link: $("#anLink").value.trim()}, true); window.scrollTo({top: 0, behavior: "smooth"}); };
+    if ($("#anTokChange")) $("#anTokChange").onclick = () => $("#anToken").classList.remove("hidden");
+    const publish = async (text) => {
+      $("#anOut").innerHTML = `<span class="spin"></span> Publishing...`;
+      try { const r = await api("/api/dev/notice", {text, link: $("#anLink").value.trim(), until: $("#anUntil").value, token: $("#anToken").value.trim()});
+        S.notice = r.notice; S.dev_has_token = true; renderDev(); toast(text ? "Published. Everyone sees it within about 30 minutes." : "Removed the announcement."); }
+      catch (e) { $("#anOut").textContent = e.message; }
+    };
+    $("#anPublish").onclick = () => { const t = $("#anText").value.trim(); if (!t) return $("#anText").focus(); if (confirmDanger("Show this message to everyone who uses ModHub?")) publish(t); };
+    if ($("#anRemove")) $("#anRemove").onclick = () => publish("");
+  }
+  $$("[data-dbg]").forEach(b => b.onclick = async () => {
+    try { const r = await api("/api/dev/debug", {action: b.dataset.dbg}); const o = $("#dbgOut"); o.textContent = r.text; o.classList.remove("hidden");
+      if (b.dataset.dbg === "replay") { try { localStorage.removeItem(SEEN_KEY); } catch (e) {} S = await api("/api/state"); renderAll(); }
+    } catch (e) { toast(e.message); }
+  });
+}
+function confirmDanger(msg) { return window.confirm(msg); }
 async function loadDev() {
+  const f = S.dev_features || {}, num = n => n == null ? "-" : Number(n).toLocaleString();
   try {
     const d = await api("/api/dev/stats");
-    const f = n => n == null ? "-" : Number(n).toLocaleString();
-    $("#devLive").textContent = d.reachable ? f(d.live) : "-";
-    $("#devDl").textContent = f(d.downloads);
-    $("#devLatest").textContent = d.latest ? f(d.latest.downloads) : "-";
+    $("#devLive").textContent = d.reachable ? num(d.live) : "-";
+    $("#devDl").textContent = num(d.downloads);
+    $("#devLatest").textContent = d.latest ? num(d.latest.downloads) : "-";
     $("#devLatestL").textContent = d.latest ? `downloads of ${d.latest.tag}` : "downloads of the newest version";
-    const max = Math.max(1, ...d.history.filter(x => x != null));
-    $("#devSpark").innerHTML = d.history.map(x => x == null ? `<i class="gap" style="height:4px"></i>` : `<i style="height:${Math.max(4, x / max * 54)}px" title="${x}"></i>`).join("");
-    $("#devNote").textContent = d.reachable ? `The last hour, 5 minutes at a time. Updated ${timeAgo(d.at)}.` : "Couldn't reach the live counter right now.";
-  } catch (e) { $("#devNote").textContent = e.message; }
+    let vals = d.history, labels = [], note = "The last hour, 5 minutes at a time.";
+    if (f.history && devView !== "hour") {
+      const h = await api("/api/dev/history", {view: devView}); vals = h.values; labels = h.labels;
+      note = devView === "day" ? "The last 24 hours. Each bar counts the copies open during that hour." : "The last 7 days. Each bar counts the copies open that day.";
+    }
+    const max = Math.max(1, ...vals.filter(x => x != null));
+    $("#devSpark").innerHTML = vals.map((x, i) => x == null ? `<i class="gap" style="height:4px"></i>` : `<i style="height:${Math.max(4, x / max * 64)}px" title="${labels[i] ? esc(labels[i]) + ": " : ""}${x}"></i>`).join("");
+    $("#devLabels").innerHTML = labels.length ? `<span>${esc(labels[0])}</span><span>${esc(labels[labels.length - 1])}</span>` : "";
+    $("#devNote").textContent = d.reachable ? `${note} Updated ${timeAgo(d.at)}.` : "Couldn't reach the live counter right now.";
+  } catch (e) { if ($("#devNote")) $("#devNote").textContent = e.message; }
 }
-$("#devRefresh").onclick = loadDev;
-$("#devLeave").onclick = async () => { await api("/api/dev/leave"); S.dev_mode = false; renderDev(); toast("Left developer mode. Your dev code brings it back."); };
+$("#devLeave").onclick = async () => { await api("/api/dev/leave"); S.dev_mode = false; renderDev(); toast("Left developer mode. Your developer code brings it back, with the same options."); };
 </script>
 </body>
 </html>
