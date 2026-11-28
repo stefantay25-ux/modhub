@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0.6"
+APP_VERSION = "4.0.7"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -6067,11 +6067,11 @@ h1{font-variation-settings:"wght" 760;letter-spacing:-.7px}
 .pal-none{padding:22px 16px;color:var(--faint);text-align:center}
 
 /* switches instead of checkboxes */
-.check input[type=checkbox]{appearance:none;-webkit-appearance:none;width:36px;height:21px;border-radius:21px;background:var(--stone-3);border:1px solid var(--edge);position:relative;cursor:pointer;flex:none;margin:0;
+.check input[type=checkbox],.dev-tile input[type=checkbox]{appearance:none;-webkit-appearance:none;width:36px;height:21px;border-radius:21px;background:var(--stone-3);border:1px solid var(--edge);position:relative;cursor:pointer;flex:none;margin:0;
   transition:background .22s,border-color .22s,box-shadow .22s}
-.check input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--knob);box-shadow:0 1px 3px rgb(0 0 0 / calc(.5 * var(--shk)));transition:transform .25s cubic-bezier(.3,1.5,.5,1),background .2s}
-.check input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent-2);box-shadow:0 0 14px -2px rgb(var(--acc2) / .6)}
-.check input[type=checkbox]:checked::after{transform:translateX(15px);background:#fff}
+.check input[type=checkbox]::after,.dev-tile input[type=checkbox]::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--knob);box-shadow:0 1px 3px rgb(0 0 0 / calc(.5 * var(--shk)));transition:transform .25s cubic-bezier(.3,1.5,.5,1),background .2s}
+.check input[type=checkbox]:checked,.dev-tile input[type=checkbox]:checked{background:var(--accent);border-color:var(--accent-2);box-shadow:0 0 14px -2px rgb(var(--acc2) / .6)}
+.check input[type=checkbox]:checked::after,.dev-tile input[type=checkbox]:checked::after{transform:translateX(15px);background:#fff}
 .check:hover input[type=checkbox]:not(:checked){border-color:var(--edge-2)}
 .check{gap:10px}
 
@@ -6583,6 +6583,35 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 .notice .ni{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--accent);color:var(--accent-ink);flex:none}
 .notice .grow{flex:1;min-width:0;font-size:14.5px}
 .notice.preview{outline:2px dashed var(--accent-edge);outline-offset:3px}
+
+/* ================= developer card, polished ================= */
+#devCard .card-h h3{display:flex;align-items:center;gap:8px}
+.dev-badge{font:700 11px/1 var(--body);padding:4px 8px;border-radius:6px;background:var(--accent-tint);color:var(--accent-2);border:1px solid var(--accent-edge)}
+.dev-switches{display:grid;grid-template-columns:repeat(auto-fill,minmax(205px,1fr));gap:10px;margin:6px 0 4px;padding:0;background:none;border:0}
+.dev-tile{position:relative;display:flex;align-items:center;gap:11px;padding:12px 12px 12px 12px;border-radius:13px;cursor:pointer;
+  background:rgb(var(--hi) / .03);border:1px solid rgb(var(--hi) / .07);transition:border-color .2s,background .2s,transform .25s cubic-bezier(.2,.9,.3,1.2)}
+.dev-tile:hover,.dev-tile:focus-within{border-color:var(--accent-edge);transform:translateY(-2px)}
+.dev-tile.on{background:color-mix(in srgb,var(--accent) 9%,transparent);border-color:var(--accent-edge)}
+.dev-tile .di{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;background:rgb(var(--hi) / .06);color:var(--muted);transition:background .2s,color .2s}
+.dev-tile.on .di{background:var(--accent);color:var(--accent-ink)}
+.dev-tile .di svg{width:18px;height:18px}
+.dev-tile .dn{flex:1;min-width:0;font-weight:650;font-size:13.5px;line-height:1.25}
+.dev-tile .dn small{display:block;font-weight:500;font-size:12px;color:var(--muted)}
+.dev-tile input{flex:none}
+.dev-tile::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 10px);width:max-content;max-width:250px;transform:translate(-50%,4px);
+  padding:9px 12px;border-radius:10px;background:rgb(var(--toast));color:var(--toast-ink);font:500 12.5px/1.45 var(--body);text-align:left;
+  box-shadow:0 14px 30px -12px rgb(0 0 0 / .6);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:20}
+.dev-tile::before{content:"";position:absolute;left:50%;bottom:calc(100% + 4px);width:10px;height:10px;transform:translate(-50%,4px) rotate(45deg);
+  background:rgb(var(--toast));opacity:0;transition:opacity .18s,transform .18s;z-index:20;pointer-events:none}
+.dev-tile:hover::after,.dev-tile:focus-within::after{opacity:1;transform:translate(-50%,0)}
+.dev-tile:hover::before,.dev-tile:focus-within::before{opacity:1;transform:translate(-50%,0) rotate(45deg)}
+#devCard{overflow:visible}
+.dev-sec{margin-top:14px;padding:16px 18px;border-radius:14px;border:1px solid rgb(var(--hi) / .07);background:rgb(var(--hi) / .02)}
+.dev-sec h4{margin:0 0 6px;gap:10px}
+.dev-sec h4 .si{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--accent-tint);color:var(--accent-2);flex:none}
+.dev-sec h4 .si svg{width:15px;height:15px}
+.dev-stats > div{background:rgb(var(--hi) / .03)}
+.dev-empty{margin-top:14px;color:var(--muted);font-size:14px;text-align:center;padding:18px;border:1px dashed rgb(var(--hi) / .12);border-radius:14px}
 </style>
 </head>
 <body>
@@ -6863,7 +6892,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
           </div>
         </section>
         <section class="card hidden" id="devCard">
-          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><div><h3>Developer</h3><p>Only you can see this. Turn each option on or off, or leave developer mode any time.</p></div></div>
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><div><h3>Developer <span class="dev-badge">Only you</span></h3><p>Switch on the tools you want. Point at one to see what it does.</p></div></div>
           <div class="dev-switches" id="devSwitches"></div>
           <div id="devBody"></div>
           <div class="actions" style="margin-top:14px"><button class="btn quiet" id="devLeave">Leave developer mode</button></div>
@@ -9391,8 +9420,26 @@ function renderNotice(n, preview) {
 }
 
 /* ---------- developer options ---------- */
-const DEV_LABELS = {stats: "Live stats", history: "Longer live history", downloads: "Download breakdown", beta: "Beta channel",
-                    versions: "Version picker", previews: "Previews", announce: "Announcements", debug: "Debug tools"};
+const DEV_ICONS = {
+  stats: '<path d="M4 19V10M10 19V5M16 19v-8M22 19H2"/>',
+  history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  downloads: '<path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/>',
+  beta: '<path d="M9 3h6M10 3v6L4.5 18a2 2 0 0 0 1.7 3h11.6a2 2 0 0 0 1.7-3L14 9V3"/><path d="M7 14h10"/>',
+  versions: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 8v4l3 2"/>',
+  previews: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  announce: '<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 6a9 9 0 0 1 0 12"/>',
+  debug: '<path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/>'};
+const DEV_INFO = {
+  stats: ["Live stats", "Now and downloads", "See how many people are using ModHub right now, plus total downloads."],
+  history: ["Longer history", "Day and week views", "Adds Day and Week views to the live count, so you can spot busy times."],
+  downloads: ["Downloads", "By platform", "A table of Windows, Mac and Linux downloads for each version."],
+  beta: ["Beta channel", "Test versions first", "Your copy gets test versions from the beta branch before everyone else."],
+  versions: ["Version picker", "Any past version", "Install any earlier version of ModHub, then go back to normal updates when you're done."],
+  previews: ["Previews", "See what players see", "Show What's new, a fix banner and other screens on your screen only. Nothing changes for players."],
+  announce: ["Announcements", "Message everyone", "Post a short message at the top of everyone's ModHub. Each person can dismiss it."],
+  debug: ["Debug tools", "Log, settings, caches", "Show the log and settings file, clear caches and replay first-run screens."]};
+const DEV_LABELS = Object.fromEntries(Object.entries(DEV_INFO).map(([k, v]) => [k, v[0]]));
+const devSvg = k => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${DEV_ICONS[k]}</svg>`;
 let devTimer = null, devView = "hour";
 function renderDev() {
   const card = $("#devCard"); if (!card || !S) return;
@@ -9401,13 +9448,14 @@ function renderDev() {
   renderNotice();
   if (!S.dev_mode) return;
   const f = S.dev_features || {};
-  $("#devSwitches").innerHTML = Object.entries(DEV_LABELS).map(([k, l]) => `<label><input type="checkbox" data-devf="${k}" ${f[k] ? "checked" : ""}> ${l}</label>`).join("");
+  $("#devSwitches").innerHTML = Object.entries(DEV_INFO).map(([k, [name, sub, tip]]) =>
+    `<label class="dev-tile ${f[k] ? "on" : ""}" data-tip="${esc(tip)}"><span class="di">${devSvg(k)}</span><span class="dn">${esc(name)}<small>${esc(sub)}</small></span><input type="checkbox" data-devf="${k}" ${f[k] ? "checked" : ""} aria-label="${esc(name)}: ${esc(tip)}"></label>`).join("");
   $$("#devSwitches [data-devf]").forEach(c => c.onchange = async () => {
     try { S.dev_features = (await api("/api/dev/features", {set: {[c.dataset.devf]: c.checked}})).dev_features; renderDev();
       if (c.dataset.devf === "beta") toast(c.checked ? "Beta channel on. ModHub now gets test versions from the beta branch." : "Beta channel off. Back to public updates."); }
     catch (e) { toast(e.message); }
   });
-  const sec = (k, title, inner) => f[k] ? `<div class="dev-sec" id="dev-${k}"><h4>${title}</h4>${inner}</div>` : "";
+  const sec = (k, title, inner) => f[k] ? `<div class="dev-sec" id="dev-${k}"><h4><span class="si">${devSvg(k)}</span>${title}</h4>${inner}</div>` : "";
   const versions = (S.changelog || []).map(e => e.version);
   $("#devBody").innerHTML =
     sec("stats", `Live${f.history ? `<div class="seg" role="tablist"><button data-dv="hour" class="${devView === "hour" ? "on" : ""}">Hour</button><button data-dv="day" class="${devView === "day" ? "on" : ""}">Day</button><button data-dv="week" class="${devView === "week" ? "on" : ""}">Week</button></div>` : ""}`,
@@ -9422,6 +9470,7 @@ function renderDev() {
        <div class="dev-row"><input id="anLink" placeholder="Link (optional, https://...)" style="flex:1"><label class="help" style="margin:0">Hide after <input type="date" id="anUntil"></label></div>
        ${S.dev_has_token ? `<p class="help" style="margin:0">GitHub access is set up. <button class="linkbtn" id="anTokChange">Change token</button></p><input id="anToken" type="password" class="hidden" placeholder="New GitHub token">` : `<input id="anToken" type="password" placeholder="GitHub access token (needed once)">`}
        <div class="dev-row"><button class="btn" id="anPreview">Preview here</button><button class="btn go" id="anPublish">Publish to everyone</button>${S.notice ? `<button class="btn quiet" id="anRemove">Remove the live one</button>` : ""}</div><p class="help" id="anOut"></p></div>`)
+    + (Object.values(f).some(Boolean) ? "" : `<div class="dev-empty">Every option is off. Switch one on above.</div>`)
     + sec("debug", "Debug tools", `<div class="dev-row"><button class="btn" data-dbg="log">Show log</button><button class="btn" data-dbg="config">Show settings file</button><button class="btn" data-dbg="clear">Clear caches</button><button class="btn" data-dbg="replay">Replay first-run screens</button></div><pre class="dev-out hidden" id="dbgOut"></pre>`);
   wireDev();
 }
