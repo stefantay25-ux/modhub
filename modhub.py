@@ -53,119 +53,118 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0.4"
+APP_VERSION = "4.0.5"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
     {"version": "4.0.2", "notes": [
-        "ModHub is now on Linux too. Download it from the website, extract it and run ModHub.",
+        "ModHub is now available for Linux. Download it from the website, extract the archive and run ModHub.",
     ]},
     {"version": "4.0", "notes": [
-        "New Home page: see which mods have updates, your instances, recent fixes and mods worth a look, all in one place. It's the first thing you see when you open ModHub.",
-        "Mod updates in one place: ModHub checks every instance for newer versions of your mods, shows what changed in each one, and updates them all in one click.",
-        "Share your modpack: send a friend a share code or a .modhub file, and they can add your whole loadout in one click.",
-        "Export a Modrinth .mrpack that opens in Prism, the Modrinth App and other launchers, and open .mrpack files from anywhere to add them to ModHub. Drag one onto the window, or use Share.",
+        "Introducing the Home page: mod updates, your instances, recent fixes and suggested mods, all on one screen. Home is now the first page ModHub opens to.",
+        "Mod updates in one place. ModHub checks every instance for newer versions of your mods, shows the changelog for each one, and updates them all with a single click.",
+        "Modpack sharing. Share any loadout as a short code or a .modhub file, and anyone can add it to ModHub in one step.",
+        "Modrinth modpack support. Export a loadout as a .mrpack for Prism, the Modrinth App and other launchers, or open any .mrpack to add it to ModHub.",
     ]},
     {"version": "3.8.1", "notes": [
-        "Fluid animations are now the standard: pages glide in, big titles shrink as you scroll, cards ease into view and pop-ups slide up like sheets.",
-        "If you'd set Animations to Fewer or Off, that's kept. You can switch to the older Classic animations in More options any time.",
+        "Fluid animations are now the default, with smoother page transitions, collapsing page titles, cards that ease into view and refined pop-up windows.",
+        "If you chose Fewer or Off, your setting is kept. The previous animations remain available as Classic under More options.",
     ]},
     {"version": "3.8", "notes": [
-        "A cleaner, fresher look: more breathing room, shorter page intros, softer cards and a tidier sidebar.",
-        "What's new now lives in the sidebar, under How to use, instead of floating over the page.",
-        "Try the new Fluid animations (Settings, More options, Animations): pages glide in, big titles shrink as you scroll, cards ease into view, and pop-ups slide up like sheets. It's a trial, so tell us what you think.",
-        "Fixed the ModHub logo spinning forever after you clicked it.",
+        "A refreshed interface with more spacing, shorter page introductions, softer cards and a cleaner sidebar.",
+        "What's new has moved to the sidebar, below How to use.",
+        "New Fluid animations, available as a preview under Settings, More options, Animations.",
+        "Fixed an issue where the ModHub logo kept spinning after it was clicked.",
     ]},
     {"version": "3.7.3", "notes": [
-        "One more secret theme is hiding somewhere in ModHub. This one comes with its own blocky font.",
+        "Added a new hidden theme with its own pixel font.",
     ]},
     {"version": "3.7.2", "notes": [
-        "ModHub now checks for updates every 30 minutes instead of every 6 hours, and checks again when you come back to it, so you get new versions sooner.",
-        "When a new version is ready, ModHub tells you straight away.",
-        "Even more secrets are hidden around ModHub. Settings now shows how many you've found.",
+        "ModHub now checks for updates every 30 minutes, and again when you return to it, so new versions arrive sooner.",
+        "You're notified as soon as a new version is ready to install.",
+        "Added more hidden themes. Settings now shows how many you've found.",
     ]},
     {"version": "3.7.1", "notes": [
         "Seven new themes: Sunset, Aurora, Nether, The End, Deep sea, Cherry and Mint.",
-        "Some of them move: Aurora has drifting lights, Nether has rising embers, The End has twinkling stars, and Deep sea has rising bubbles. Turn Animations off in More options if you'd rather they stayed still.",
-        "There are a few secrets hidden around ModHub. Have a look around.",
+        "Aurora, Nether, The End and Deep sea have animated backgrounds. Set Animations to Off in More options to keep them still.",
+        "Added a few hidden themes to discover.",
     ]},
     {"version": "3.7", "notes": [
-        "ModHub now checks your mods before you play: if an instance's mods change, even ones you added by hand, it checks and fixes them right away.",
-        "Spots two copies of the same mod and turns off the extra one.",
-        "Spots mods made for a different loader (like a NeoForge mod in a Fabric instance) and swaps in the right version, or turns it off if there isn't one.",
+        "ModHub now checks an instance whenever its mods change, including mods added by hand, and fixes problems before you launch the game.",
+        "Duplicate copies of the same mod are detected, and the extra copy is turned off.",
+        "Mods built for a different loader, such as a NeoForge mod in a Fabric instance, are replaced with the correct version or turned off if none exists.",
     ]},
     {"version": "3.6", "notes": [
-        "New: ModHub fixes \"Incompatible mods found!\" by itself. When Fabric, Quilt, NeoForge or Forge stops the game because mods don't work together, ModHub does what the error asks: adds missing mods, swaps in versions that fit, and turns off a mod that clashes.",
-        "You'll see \"Fixing\" and then \"Fixed\" at the top of ModHub, with a list of what changed. Then just start Minecraft again.",
-        "Downloads that fail or arrive damaged are now retried automatically.",
+        "ModHub now resolves \"Incompatible mods found!\" errors automatically. When Fabric, Quilt, NeoForge or Forge stops the game, ModHub adds missing mods, swaps in compatible versions and turns off conflicting ones.",
+        "Progress appears at the top of ModHub, followed by a summary of every change. Then launch Minecraft again.",
+        "Failed or corrupted downloads are now retried automatically.",
     ]},
     {"version": "3.5", "notes": [
-        "On Windows, the Python version of ModHub now turns itself into the ModHub app by itself, so it always gets its own window instead of an Edge or Chrome one.",
-        "Your desktop and Start menu shortcuts then open the app, and so does modhub.py.",
+        "On Windows, the Python version of ModHub now upgrades itself to the ModHub app, so it always opens in its own window.",
+        "Desktop and Start menu shortcuts, and modhub.py itself, now open the app.",
     ]},
     {"version": "3.4", "notes": [
-        "New: How to use. Click it at the bottom of the sidebar for a quick four-step guide, with a button to jump to each page.",
+        "Added How to use: a short four-step guide at the bottom of the sidebar, with shortcuts to each page.",
     ]},
     {"version": "3.3", "notes": [
-        "New: ModHub for Mac. Download it from modhub-mc.github.io, for Macs with Apple chips or older Intel Macs.",
-        "More options under Appearance is tidier: two small panels, Colours and Layout, with shorter labels.",
+        "ModHub is now available for Mac, for both Apple silicon and Intel Macs.",
+        "More options under Appearance is reorganised into two panels, Colours and Layout.",
     ]},
     {"version": "3.2", "notes": [
-        "Appearance is simpler: pick one of nine ready-made themes, or Your colour for any colour you like. Every detailed option is still there under More options.",
-        "Discover no longer shows blurry pictures. Mods without screenshots show their icon, sharp and centred.",
-        "ModHub.exe: you can now download ModHub as a normal Windows app from modhub-mc.github.io, with no Python needed. It keeps itself up to date like before.",
+        "Appearance is simpler: choose from nine ready-made themes, or pick any colour with Your colour. Detailed options remain under More options.",
+        "Discover now shows a sharp mod icon when a mod has no screenshots, instead of a blurred image.",
+        "ModHub is now available as a standalone Windows app (ModHub.exe), with no Python required. It updates itself automatically.",
     ]},
     {"version": "3.1", "notes": [
-        "New: gradient backgrounds. Your colour fades into black in dark mode, or into white in light mode. Pick Gradient, Vivid, Glow or Plain, choose the direction, and set the strength.",
-        "New: any colour you like. Pick Custom under Colour to choose your own.",
-        "More ways to make ModHub yours: rounder or sharper corners, a see-through sidebar, four sizes, and fewer or no animations.",
-        "Updates now come straight from GitHub by themselves. There's nothing to set up any more.",
-        "Settings is laid out in tidy cards, and the Install page is grouped the same way.",
-        "Sharper pictures: mod pages open with the mod's featured image and use full-size screenshots, and Discover shows a screenshot for each mod.",
+        "Gradient backgrounds that fade your colour into black in dark mode or white in light mode, with Gradient, Vivid, Glow and Plain styles, direction and strength controls.",
+        "Custom colours: choose any colour under Colour.",
+        "More customisation: corner style, a translucent sidebar, four interface sizes and animation levels.",
+        "Updates are now delivered directly from GitHub, with no setup required.",
+        "Settings and the Install page are now organised into clear sections.",
+        "Higher-resolution images: mod pages open with the featured image and full-size screenshots, and Discover shows a screenshot for each mod.",
     ]},
     {"version": "3.0", "notes": [
-        "New: Discover. See what's popular and freshly updated for your Minecraft version, plus picks that go with the mods you already have.",
-        "New: mod pages. Click any mod to see its screenshots, description, what it needs and whether it's out for your version.",
-        "New: light mode, dark mode, or match Windows, plus six colour themes. Find them in Settings, under Appearance.",
-        "A calmer layout: fewer buttons on the Library page, a tidier sidebar, and Settings grouped into clear sections.",
-        "Fixed the logo turning dark when you hovered over it.",
+        "Introducing Discover: popular and recently updated mods for your Minecraft version, plus recommendations based on your library.",
+        "Mod pages: view screenshots, descriptions, requirements and version availability for any mod.",
+        "Light mode, dark mode or match your system, plus six colour themes, under Settings, Appearance.",
+        "A cleaner layout with fewer buttons in Library, a tidier sidebar and Settings grouped into sections.",
+        "Fixed the logo darkening on hover.",
     ]},
     {"version": "2.6", "notes": [
-        "New: a What's new button in the bottom-right corner. It shows what the last few updates brought, or all of them.",
-        "A red dot on it means there's an update you haven't read about yet.",
+        "Added a What's new button showing recent updates or the full history.",
+        "A red dot indicates an update you haven't read about yet.",
     ]},
     {"version": "2.5", "notes": [
-        "New: What's new. After ModHub updates, it shows you what changed. Before you update, you can see what's coming.",
-        "The full history of ModHub updates is in Settings, under Updates.",
+        "After an update, ModHub shows what changed. You can also preview what's coming before you update.",
+        "The full update history is available under Settings, Updates.",
     ]},
     {"version": "2.4", "notes": [
-        "New: press Ctrl+K (or click Search in the sidebar) to jump to any page, mod, loadout or action.",
-        "Installs now show a progress ring, with each mod popping into a list as it lands.",
-        "Proper on/off switches, nicer dropdowns and a soft ripple on buttons.",
-        "The page title turns into a frosted bar when you scroll down.",
-        "Hover labels on mod slots, small pictures on empty pages, and an animated logo at start-up.",
+        "Quick search: press Ctrl+K, or click Search in the sidebar, to jump to any page, mod, loadout or action.",
+        "Installs show a progress ring, with each mod listed as it completes.",
+        "Refined switches, dropdowns and button feedback.",
+        "The page title becomes a compact bar as you scroll.",
+        "Tooltips on mod slots, illustrated empty states and an animated logo on start-up.",
     ]},
     {"version": "2.3", "notes": [
-        "New: What changed. After updating an instance, see each mod's own changelog.",
-        "New: save your whole library to one backup file and restore it on another PC.",
+        "What changed: after updating an instance, view each mod's changelog.",
+        "Library backups: save your entire library to one file and restore it on another computer.",
     ]},
     {"version": "2.2", "notes": [
-        "New: crash helper. When Minecraft crashes, ModHub finds the mod that caused it and offers a fix.",
-        "New: performance boost button that adds a trusted set of mods for more FPS.",
-        "New: bring your settings, keybinds and servers along to a new instance.",
+        "Crash helper: when Minecraft crashes, ModHub identifies the responsible mod and offers a fix.",
+        "Performance boost: add a trusted set of mods for higher FPS in one click.",
+        "Bring your settings, keybinds and server list into a new instance.",
     ]},
     {"version": "2.1", "notes": [
-        "New: ModHub checks that your mods work together and fixes what it can, like Sodium and Iris versions that clash.",
-        "A popup tells you about anything it couldn't fix, with a button to turn that mod off.",
+        "ModHub now checks that your mods are compatible and fixes what it can, such as mismatched Sodium and Iris versions.",
+        "Anything that can't be fixed automatically is listed, with an option to turn that mod off.",
     ]},
     {"version": "2.0", "notes": [
-        "New: loadouts, so you can keep different sets of mods, like PvP or Building.",
-        "New: Update my instances, to bring everything you installed up to date in one click.",
-        "ModHub tells you when a mod that wasn't ready for your version comes out.",
+        "Loadouts: keep separate sets of mods, such as PvP or Building.",
+        "Update my instances: bring everything you've installed up to date in one click.",
+        "Notifications when a mod that wasn't ready for your version is released.",
     ]},
     {"version": "1.x", "notes": [
-        "Resource packs and shaders, CurseForge file import, new Minecraft versions show up by themselves, "
-        "its own window, automatic updates from GitHub, and Port with Claude.",
+        "Resource packs and shaders, CurseForge file import, automatic detection of new Minecraft versions, a dedicated app window, automatic updates from GitHub, and Port with Claude.",
     ]},
 ]
 USER_AGENT = f"modhub/{APP_VERSION} (personal mod manager script)"
@@ -6201,7 +6200,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 .res{padding:14px 18px}
 .empty{padding:44px 24px}
 .group-h{margin-top:34px}
-/* ================= 3.8: Fluid motion (a trial of Apple-style animation) ================= */
+/* ================= 3.8: Fluid motion ================= */
 :root[data-motion="fluid"] section.enter{animation:fluidIn .6s cubic-bezier(.2,.9,.2,1) both}
 @keyframes fluidIn{from{opacity:0;transform:translateY(22px) scale(.985);filter:blur(6px)}}
 :root[data-motion="fluid"] #navPill{transition:top .55s cubic-bezier(.34,1.45,.5,1),height .55s cubic-bezier(.34,1.45,.5,1)}
@@ -6540,7 +6539,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
                 <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
                 <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
                 <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio" title="Small">S</button><button data-v="100" role="radio" title="Normal">M</button><button data-v="110" role="radio" title="Large">L</button><button data-v="120" role="radio" title="Larger">XL</button></div></div>
-                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="fluid" role="radio" title="Smooth, Apple-style animations">Fluid</button><button data-v="full" role="radio" title="The animations from before 3.8.1">Classic</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="fluid" role="radio" title="Smooth, modern animations">Fluid</button><button data-v="full" role="radio" title="The original animations">Classic</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
                 <div class="opt reset"><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
               </div>
             </div>
