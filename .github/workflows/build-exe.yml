@@ -251,19 +251,20 @@ jobs:
             [ -f "out/$z/$z" ] && files="$files out/$z/$z"
           done
           python3 - <<'PY'
-          import json, hashlib, pathlib, datetime
+          import json, hashlib, pathlib, datetime, os
           d = json.loads(pathlib.Path("out/windows/build/defender.json").read_text(encoding="utf-8-sig"))
           c = json.loads(pathlib.Path("clam.json").read_text())
           vt = json.loads(pathlib.Path("vt.json").read_text())
           files = [{"file": f.name, "sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "size": f.stat().st_size} for f in sorted(pathlib.Path("scan").iterdir())]
-          scan = {"date": datetime.date.today().isoformat(), "scanners": [d, c], "files": files, "virustotal": vt}
+          scan = {"date": datetime.date.today().isoformat(), "run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}", "scanners": [d, c], "files": files, "virustotal": vt}
           word = {"clean": "no threats found", "threat": "flagged", "error": "couldn't finish"}
           lines = ["", "## Safety scan", "",
                    f"Every download was scanned on {scan['date']} before it was published.", "",
                    f"- **Microsoft Defender** ({d.get('version', '')}): {word.get(d['result'], d['result'])} in ModHub.exe",
-                   f"- **ClamAV** ({c.get('version', '')}): {word.get(c['result'], c['result'])} in every file"]
+                   f"- **ClamAV** ({c.get('version', '')}): {word.get(c['result'], c['result'])} in any file"]
           for v in vt:
               lines.append(f"- **VirusTotal**, {v['file']}: {v['flagged']} of {v['engines']} engines flagged it ([full report]({v['link']}))")
+          lines += ["", f"[See the full scan log]({scan['run']})"]
           lines += ["", "SHA-256 checksums, so you can check your download is the real one:", "", "```"]
           lines += [f"{x['sha256']}  {x['file']}" for x in files] + ["```", "", "<!-- modhub-scan " + json.dumps(scan) + " -->"]
           notes = pathlib.Path("out/windows/build/notes.md").read_text(encoding="utf-8")
