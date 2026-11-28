@@ -24,13 +24,19 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install the builder
-        run: python -m pip install --upgrade pip pyinstaller pywebview
+        # PyInstaller's starter is built from source here, so ModHub.exe doesn't share the exact same starter
+        # as every other PyInstaller app (some of which are malware), which antivirus programs often flag.
+        env:
+          PYINSTALLER_COMPILE_BOOTLOADER: "1"
+        run: |
+          python -m pip install --upgrade pip wheel setuptools pywebview
+          python -m pip install --no-binary pyinstaller --no-cache-dir pyinstaller
       - name: Make the icon and release notes
         run: python exe/prepare.py
       - name: Build ModHub.exe
         run: >-
           pyinstaller --noconfirm --clean --onefile --windowed
-          --name ModHub --icon build/modhub.ico
+          --name ModHub --icon build/modhub.ico --version-file build/version.txt --noupx
           --add-data "modhub.py;." --paths .
           --collect-all webview --collect-all pythonnet --collect-all clr_loader
           --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms

@@ -30,6 +30,28 @@ body = "\n".join(f"- {n}" for n in notes) or "- Improvements and fixes."
     "You only need to do that once. ModHub keeps itself up to date after that.\n",
     "utf-8")
 
+# Windows file details (Properties > Details): name, description, publisher and version.
+# A file without them looks more suspicious to some antivirus programs.
+nums = [int(x) for x in __import__("re").findall(r"\d+", version)][:4]
+nums += [0] * (4 - len(nums))
+vt = tuple(nums)
+(out / "version.txt").write_text(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={vt}, prodvers={vt}, mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'ModHub'),
+      StringStruct('FileDescription', 'ModHub - installs your Minecraft mods into any version'),
+      StringStruct('FileVersion', '{version}'),
+      StringStruct('InternalName', 'ModHub'),
+      StringStruct('LegalCopyright', 'ModHub contributors. Open source: github.com/stefantay25-ux/modhub'),
+      StringStruct('OriginalFilename', 'ModHub.exe'),
+      StringStruct('ProductName', 'ModHub'),
+      StringStruct('ProductVersion', '{version}')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+""", "utf-8")
+
 # icon: ModHub draws its own
 sys.path.insert(0, str(root))
 import modhub  # noqa: E402
