@@ -53,10 +53,17 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.8.1"
+APP_VERSION = "4.0"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "4.0", "notes": [
+        "New Home page: see which mods have updates, your instances, recent fixes and mods worth a look, all in one place. It's the first thing you see when you open ModHub.",
+        "Mod updates in one place: ModHub checks every instance for newer versions of your mods, shows what changed in each one, and updates them all in one click.",
+        "Share your modpack: send a friend a share code or a .modhub file, and they can add your whole loadout in one click.",
+        "Export a Modrinth .mrpack that opens in Prism, the Modrinth App and other launchers, and open .mrpack files from anywhere to add them to ModHub. Drag one onto the window, or use Share.",
+        "You can choose to be counted in ModHub's anonymous count of people using it. It's off unless you say yes, and you can change it in Settings.",
+    ]},
     {"version": "3.8.1", "notes": [
         "Fluid animations are now the standard: pages glide in, big titles shrink as you scroll, cards ease into view and pop-ups slide up like sheets.",
         "If you'd set Animations to Fewer or Off, that's kept. You can switch to the older Classic animations in More options any time.",
@@ -765,7 +772,8 @@ def resolve(job, favorites, gv, loader, ports=None):
             it["status"] = "not_ready"
             continue
         it.update(status="ready", version=v.get("version_number", ""), changelog=(v.get("changelog") or "")[:4000],
-                  file={"url": f["url"], "filename": safe_filename(f["filename"]), "sha1": (f.get("hashes") or {}).get("sha1")})
+                  file={"url": f["url"], "filename": safe_filename(f["filename"]), "sha1": (f.get("hashes") or {}).get("sha1"),
+                        "sha512": (f.get("hashes") or {}).get("sha512"), "size": f.get("size")})
         if it["kind"] == "mod":
             for d in v.get("dependencies") or []:
                 if d.get("dependency_type") != "required":
@@ -1904,6 +1912,420 @@ def copy_settings(src: Path, dst: Path, log=print):
 BACKUP_MARKER = "modhub-backup.json"
 
 
+# =========================================================================== #
+# 4.0: mod updates in one place
+# =========================================================================== #
+MOD_UPDATES_SECONDS = 6 * 60 * 60
+
+
+def _instance_entries(rec):
+    """Every Modrinth file ModHub put in this instance: (kind, key, file name, version it installed)."""
+    mods_dir = Path(rec["path"])
+    out = []
+    for kind, folder in (("mod", mods_dir), ("resourcepack", mods_dir.parent / "resourcepacks"), ("shader", mods_dir.parent / "shaderpacks")):
+        try:
+            manifest = json.loads((folder / MANIFEST_NAME).read_text("utf-8"))
+        except Exception:
+            continue
+        try:
+            versions = json.loads((folder / VERSIONS_NAME).read_text("utf-8"))
+        except Exception:
+            versions = {}
+        for key, fname in (manifest or {}).items():
+            if isinstance(key, str) and key.startswith("modrinth:") and isinstance(fname, str) and (folder / fname).exists():
+                out.append((kind, key, fname, versions.get(key, "")))
+    return out
+
+
+def check_mod_updates(job=None):
+    """Look up the newest version of every mod in every instance ModHub installed, without changing anything."""
+    from concurrent.futures import ThreadPoolExecutor
+    with CFG_LOCK:
+        recs = [dict(r) for r in CFG.get("installs", []) if not r.get("export") and r.get("path")]
+        pins = dict(CFG.get("pins") or {})
+        names = {f"{f['source']}:{f['id']}": f for lo in CFG["loadouts"].values() for f in lo["favorites"]}
+    wanted, rows = {}, []
+    for rec in recs:
+        if not Path(rec["path"]).is_dir():
+            continue
+        off = set(rec.get("disabled") or [])
+        for kind, key, fname, ver in _instance_entries(rec):
+            if key in off:
+                continue
+            pid = key.split(":", 1)[1]
+            loaders = watch_loaders(kind, rec["loader"])
+            lk = (pid, tuple(loaders), rec["version"], pins.get(f"{pid}|{rec['version']}|{rec['loader']}") if kind == "mod" else None)
+            wanted[lk] = None
+            rows.append((rec, kind, key, fname, ver, lk))
+    if job:
+        job.log(f"Checking {len(wanted)} mods across {len(recs)} instances...")
+
+    def look(lk):
+        pid, loaders, gv, since = lk
+        try:
+            return lk, mr_latest_for(pid, list(loaders), gv, since=since)
+        except Exception:
+            return lk, None
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for n, (lk, v) in enumerate(pool.map(look, list(wanted)), 1):
+            wanted[lk] = v
+            if job:
+                job.progress = .05 + .85 * n / max(len(wanted), 1)
+    items, unknown = [], []
+    for rec, kind, key, fname, ver, lk in rows:
+        v = wanted.get(lk)
+        f = v and mr_primary_file(v)
+        if not f or f["filename"] == fname:
+            continue
+        fav = names.get(key) or {}
+        items.append({"instance": rec["id"], "instance_name": rec["name"], "version": rec["version"], "loader": rec["loader"],
+                      "key": key, "kind": kind, "name": fav.get("name") or "", "icon": fav.get("icon") or "", "url": fav.get("url") or "",
+                      "from": ver or re.sub(r"\.(jar|zip)$", "", fname), "to": v.get("version_number", ""),
+                      "date": (v.get("date_published") or "")[:10], "changelog": (v.get("changelog") or "")[:1500]})
+        if not fav.get("name"):
+            unknown.append(key.split(":", 1)[1])
+    if unknown:  # dependencies we only know by id
+        try:
+            for pid, pr in mr_projects(sorted(set(unknown))).items():
+                fav = mr_fav(pr)
+                for it in items:
+                    if it["key"] == f"modrinth:{pid}" and not it["name"]:
+                        it.update(name=fav["name"], icon=fav["icon"], url=fav["url"])
+        except Exception:
+            pass
+    for it in items:
+        it["name"] = it["name"] or it["key"].split(":", 1)[1]
+    result = {"at": now_iso(), "items": items, "instances": len(recs)}
+    with CFG_LOCK:
+        CFG["mod_updates"] = result
+        save_config(CFG)
+    return result
+
+
+def mod_updates_job(job):
+    return check_mod_updates(job)
+
+
+def apply_mod_updates_job(job, iids=None):
+    with CFG_LOCK:
+        waiting = sorted({u["instance"] for u in (CFG.get("mod_updates") or {}).get("items", [])})
+        recs = [r for r in CFG.get("installs", []) if r["id"] in (iids or waiting) and not r.get("export")]
+    if not recs:
+        raise UserError("Everything is already up to date.")
+    summary = []
+    for n, rec in enumerate(recs, 1):
+        job.log(f"--- {rec['name']} ({n} of {len(recs)})")
+        try:
+            res = install_job(job, install_request(rec), remember=False)
+            summary.append({"name": rec["name"], "install_id": rec["id"], "updates": res.get("updates") or [],
+                            "problems": res.get("problems") or []})
+        except UserError as e:
+            summary.append({"name": rec["name"], "error": str(e)})
+    return {"summary": summary, "mod_updates": CFG.get("mod_updates")}
+
+
+def mod_updates_watch():
+    time.sleep(120)
+    while True:
+        try:
+            with CFG_LOCK:
+                last = (CFG.get("mod_updates") or {}).get("at")
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() if last else 1e9
+            if age >= MOD_UPDATES_SECONDS - 60 and not any(not j.done for j in JOBS.values()):
+                check_mod_updates()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(30 * 60)
+
+
+# =========================================================================== #
+# 4.0: sharing modpacks (share codes, .modhub files and Modrinth .mrpack files)
+# =========================================================================== #
+SHARE_PREFIX = "MH1-"
+SHARE_KINDS = {"mod": "m", "resourcepack": "r", "shader": "s"}
+SHARE_KINDS_BACK = {v: k for k, v in SHARE_KINDS.items()}
+SHARE_PENDING = {}
+MRPACK_LOADERS = {"fabric": "fabric-loader", "quilt": "quilt-loader", "forge": "forge", "neoforge": "neoforge"}
+
+
+def _loadout(lid):
+    with CFG_LOCK:
+        lid = lid if lid in CFG["loadouts"] else CFG["active_loadout"]
+        lo = json.loads(json.dumps(CFG["loadouts"][lid]))
+    return lid, lo
+
+
+def share_code(lid=None):
+    import base64, zlib
+    _, lo = _loadout(lid)
+    mr = [f for f in lo["favorites"] if f.get("source") == "modrinth"]
+    if not mr:
+        raise UserError(f"\"{lo['name']}\" has no Modrinth mods to share yet. Files you added yourself can't go in a share code.")
+    data = json.dumps({"n": lo["name"], "m": [SHARE_KINDS.get(f.get("kind") or "mod", "m") + str(f["id"]) for f in mr]}, separators=(",", ":"))
+    code = SHARE_PREFIX + base64.urlsafe_b64encode(zlib.compress(data.encode(), 9)).decode().rstrip("=")
+    return {"code": code, "name": lo["name"], "count": len(mr), "own": len(lo["favorites"]) - len(mr)}
+
+
+def decode_share(text):
+    import base64, zlib
+    m = re.search(re.escape(SHARE_PREFIX) + r"([A-Za-z0-9_-]{8,20000})", text or "")
+    if not m:
+        raise UserError("That doesn't look like a ModHub share code. They start with MH1-.")
+    raw = m.group(1)
+    try:
+        packed = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        d = zlib.decompressobj()
+        data = json.loads(d.decompress(packed, 200_000).decode())
+    except Exception:
+        raise UserError("That share code is damaged. Ask for it again, and copy all of it.")
+    items = []
+    for x in (data.get("m") or [])[:500] if isinstance(data, dict) else []:
+        if isinstance(x, str) and len(x) > 1 and x[0] in SHARE_KINDS_BACK and re.fullmatch(r"[A-Za-z0-9]{2,32}", x[1:]):
+            items.append({"id": x[1:], "kind": SHARE_KINDS_BACK[x[0]]})
+    if not items:
+        raise UserError("That share code has no mods in it.")
+    return {"name": str(data.get("n") or "Shared modpack")[:40], "items": items, "own_files": []}
+
+
+def _pack_preview(pack):
+    found = mr_projects([i["id"] for i in pack["items"]])
+    favs = []
+    for it in pack["items"]:
+        p = found.get(it["id"]) or next((x for x in found.values() if x.get("slug") == it["id"]), None)
+        if p:
+            favs.append(mr_fav(p))
+    token = uuid.uuid4().hex
+    SHARE_PENDING[token] = {"name": pack["name"], "favorites": favs, "own_files": pack.get("own_files", []), "at": time.time()}
+    for k in [k for k, v in SHARE_PENDING.items() if time.time() - v["at"] > 3600]:
+        SHARE_PENDING.pop(k, None)
+    return {"token": token, "name": pack["name"], "items": favs, "missing": len(pack["items"]) - len(favs),
+            "own": [Path(x).name for x in pack.get("own_files", [])]}
+
+
+def share_preview_code(code):
+    return _pack_preview(decode_share(code))
+
+
+def read_mrpack(path):
+    """A Modrinth modpack: find each file on Modrinth by its hash; keep any extra files it carries."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo("modrinth.index.json")
+        if info.file_size > 5_000_000:
+            raise UserError("That modpack's list is too big.")
+        index = json.loads(z.read(info))
+        hashes = []
+        for f in (index.get("files") or [])[:1000]:
+            h = (f.get("hashes") or {}).get("sha1")
+            if isinstance(h, str) and re.fullmatch(r"[0-9a-fA-F]{40}", h) and str(f.get("path", "")).startswith(("mods/", "resourcepacks/", "shaderpacks/")):
+                hashes.append(h.lower())
+        found = http_json("POST", f"{MODRINTH}/version_files", {"hashes": hashes, "algorithm": "sha1"}) if hashes else {}
+        items, seen = [], set()
+        for h in hashes:
+            pid = ((found or {}).get(h) or {}).get("project_id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                items.append({"id": pid, "kind": "mod"})
+        own = []
+        tmpdir = Path(tempfile.mkdtemp(prefix="share-", dir=DATA_DIR))
+        total = 0
+        for zi in z.infolist()[:2000]:
+            parts = zi.filename.split("/")
+            if len(parts) == 3 and parts[0] in ("overrides", "client-overrides") and parts[1] in ("mods", "resourcepacks", "shaderpacks") \
+                    and parts[2].lower().endswith((".jar", ".zip")) and not zi.is_dir():
+                total += zi.file_size
+                if total > 300_000_000:
+                    break
+                try:
+                    name = safe_filename(parts[2])
+                except UserError:
+                    continue
+                out = tmpdir / name
+                with z.open(zi) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                own.append(str(out))
+    missing = len(hashes) - len(seen)
+    name = str(index.get("name") or Path(path).stem)[:40]
+    return {"name": name, "items": items, "own_files": own, "unmatched": max(0, missing)}
+
+
+def share_preview_file(path, filename):
+    low = filename.lower()
+    if low.endswith(".mrpack"):
+        try:
+            pack = read_mrpack(path)
+        except (zipfile.BadZipFile, KeyError):
+            raise UserError(f"{filename} isn't a Modrinth modpack.")
+        if not pack["items"] and not pack["own_files"]:
+            raise UserError(f"ModHub couldn't find any of {filename}'s mods on Modrinth.")
+        prev = _pack_preview(pack) if pack["items"] else {"token": uuid.uuid4().hex, "name": pack["name"], "items": [], "missing": 0,
+                                                            "own": [Path(x).name for x in pack["own_files"]]}
+        if not pack["items"]:
+            SHARE_PENDING[prev["token"]] = {"name": pack["name"], "favorites": [], "own_files": pack["own_files"], "at": time.time()}
+        prev["missing"] += pack.get("unmatched", 0)
+        return prev
+    text = Path(path).read_text("utf-8", errors="replace")[:500_000]
+    return share_preview_code(text)
+
+
+def share_import(token, mode="new", name=None):
+    pend = SHARE_PENDING.pop(token, None)
+    if not pend:
+        raise UserError("That share has expired. Open the code or file again.")
+    with CFG_LOCK:
+        if mode == "new":
+            base = (name or pend["name"] or "Shared modpack").strip()[:40] or "Shared modpack"
+            taken = {v["name"].lower() for v in CFG["loadouts"].values()}
+            nm, n = base, 2
+            while nm.lower() in taken:
+                nm, n = f"{base} {n}"[:40], n + 1
+            lid = uuid.uuid4().hex[:8]
+            CFG["loadouts"][lid] = {"name": nm, "favorites": []}
+            CFG["active_loadout"] = lid
+            CFG["favorites"] = CFG["loadouts"][lid]["favorites"]
+        have = {f"{f['source']}:{f['id']}" for f in CFG["favorites"]}
+        added = 0
+        for f in pend["favorites"]:
+            if f"modrinth:{f['id']}" not in have:
+                CFG["favorites"].append(f)
+                added += 1
+        target = CFG["loadouts"][CFG["active_loadout"]]["name"]
+        save_config(CFG)
+    own = 0
+    for fp in pend.get("own_files", []):
+        p = Path(fp)
+        if p.is_file():
+            try:
+                add_local_file(p, p.name)
+                own += 1
+            except UserError:
+                pass
+            finally:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    return {"added": added, "own": own, "loadout": target, **state()}
+
+
+def _downloads_dir():
+    home = Path.home()
+    out = next((d for d in (home / "Downloads", home / "Desktop") if d.is_dir()), EXPORT_DIR)
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _unique(folder, stem, ext):
+    stem = re.sub(r'[\\/:*?"<>|]+', "", stem).strip() or "ModHub"
+    out, n = folder / f"{stem}{ext}", 2
+    while out.exists():
+        out, n = folder / f"{stem} ({n}){ext}", n + 1
+    return out
+
+
+def share_save_file(lid=None):
+    c = share_code(lid)
+    out = _unique(_downloads_dir(), c["name"], ".modhub")
+    out.write_text(json.dumps({"format": "modhub-pack", "version": 1, "name": c["name"], "code": c["code"],
+                               "made_with": f"ModHub {APP_VERSION}"}, indent=2), "utf-8")
+    OPENABLE.add(str(out))
+    return {"path": str(out), "file": out.name, "where": out.parent.name, "count": c["count"], "own": c["own"]}
+
+
+def mrpack_job(job, lid, gv, loader):
+    gv = (gv or "").strip()
+    if not gv or loader not in MRPACK_LOADERS:
+        raise UserError("Pick a Minecraft version and a loader.")
+    _, lo = _loadout(lid)
+    if not lo["favorites"]:
+        raise UserError(f"\"{lo['name']}\" is empty.")
+    job.log(f"Working out {lo['name']} for Minecraft {gv} ({loader})...")
+    with CFG_LOCK:
+        ports = dict(CFG.get("ports") or {})
+    items = resolve(job, lo["favorites"], gv, loader, ports)
+    ready = [i for i in items if i["status"] == "ready"]
+    if not ready:
+        raise UserError(f"Nothing in \"{lo['name']}\" is out for {gv} yet.")
+    lv = loader_version(loader, gv)
+    files, extra = [], []
+    for it in ready:
+        f = it["file"]
+        folder = {"resourcepack": "resourcepacks", "shader": "shaderpacks"}.get(it.get("kind"), "mods")
+        if f.get("local"):
+            extra.append((Path(f["local"]), f"overrides/{folder}/{f['filename']}"))
+        elif f.get("sha1") and f.get("sha512"):
+            files.append({"path": f"{folder}/{f['filename']}", "hashes": {"sha1": f["sha1"], "sha512": f["sha512"]},
+                          "env": {"client": "required", "server": "required"}, "downloads": [f["url"]], "fileSize": int(f.get("size") or 0)})
+        else:
+            it["notes"].append("left out: Modrinth didn't give its checksums")
+    index = {"formatVersion": 1, "game": "minecraft", "versionId": "1.0", "name": lo["name"],
+             "summary": f"Made with ModHub {APP_VERSION}", "files": files,
+             "dependencies": {"minecraft": gv, MRPACK_LOADERS[loader]: lv}}
+    out = _unique(_downloads_dir(), f"{lo['name']} {gv}", ".mrpack")
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("modrinth.index.json", json.dumps(index, indent=2))
+        for src, arc in extra:
+            if src.is_file():
+                z.write(src, arc)
+    OPENABLE.add(str(out))
+    job.log(f"Saved {out.name}")
+    return {"path": str(out), "file": out.name, "where": out.parent.name, "count": len(files) + len(extra),
+            "left_out": [{"name": i["name"], "status": i["status"]} for i in items if i["status"] != "ready" and i.get("favorite")]}
+
+
+# =========================================================================== #
+# 4.0: the live count (only if you say yes) and the developer's stats
+# =========================================================================== #
+LIVE_URL = "https://abacus.jasoncameron.dev"
+LIVE_NS = "modhub-mc"
+LIVE_BUCKET = 300
+
+
+def live_loop():
+    sent = None
+    time.sleep(20)
+    while True:
+        try:
+            b = int(time.time() // LIVE_BUCKET)
+            with CFG_LOCK:
+                ok = CFG.get("live_ping") is True
+            if ok and LIVE_URL and b != sent:
+                req = urllib.request.Request(f"{LIVE_URL}/hit/{LIVE_NS}/live-{b}", headers={"User-Agent": USER_AGENT})
+                urllib.request.urlopen(req, timeout=15).read(200)
+                sent = b
+        except Exception:
+            pass
+        time.sleep(60)
+
+
+def dev_stats():
+    with CFG_LOCK:
+        if not CFG.get("dev_mode"):
+            raise UserError("Developer mode is off.")
+    from concurrent.futures import ThreadPoolExecutor
+    now = int(time.time() // LIVE_BUCKET)
+
+    def get(b):
+        try:
+            req = urllib.request.Request(f"{LIVE_URL}/get/{LIVE_NS}/live-{b}", headers={"User-Agent": USER_AGENT})
+            return json.loads(urllib.request.urlopen(req, timeout=10).read(500)).get("value", 0)
+        except urllib.error.HTTPError as e:
+            return 0 if e.code == 404 else None
+        except Exception:
+            return None
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        hist = list(pool.map(get, [now - i for i in range(12, -1, -1)]))  # the last hour, 5 minutes at a time
+    downloads, latest = None, None
+    try:
+        rels = http_json("GET", f"https://api.github.com/repos/{DEFAULT_UPDATE_SOURCE}/releases?per_page=100") or []
+        downloads = sum(a.get("download_count", 0) for r in rels for a in r.get("assets", []))
+        latest = {"tag": rels[0].get("tag_name"), "downloads": sum(a.get("download_count", 0) for a in rels[0].get("assets", []))} if rels else None
+    except Exception:
+        pass
+    live = max([h for h in hist[-2:] if h is not None] or [0])
+    return {"live": live, "history": hist, "downloads": downloads, "latest": latest, "reachable": any(h is not None for h in hist),
+            "at": now_iso()}
+
+
 def save_library_backup():
     """One file with your loadouts, the files you added yourself and your update setting."""
     with CFG_LOCK:
@@ -2284,6 +2706,9 @@ def record_install(req, ctx, lid, lname, mods_dir, export, items, updates=None):
             rec["last_changes"] = old.get("last_changes", [])
             rec["changes_at"] = old.get("changes_at")
         installs[:] = [r for r in installs if r["id"] != iid] + [rec]
+        mu = CFG.get("mod_updates")
+        if isinstance(mu, dict):
+            mu["items"] = [u for u in mu.get("items", []) if u.get("instance") != iid]
         # watch what isn't out yet; stop watching what is
         watch = CFG.setdefault("watch", {})
         for it in items:
@@ -3496,7 +3921,7 @@ def state():
             "watching": len(cfg.get("watch") or {}), "crashes": cfg.get("crashes", []),
             "update_source": current_update_source(cfg), "update_auto": cfg.get("update_auto", True),
             "update_last_check": cfg.get("update_last_check"), "just_updated": cfg.get("just_updated"),
-            "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "app_switch": app_switch_state(),
+            "mod_updates": cfg.get("mod_updates"), "live_ping": cfg.get("live_ping"), "dev_mode": bool(cfg.get("dev_mode")), "theme": theme_of(cfg), "secrets": [x for x in cfg.get("secrets", []) if x in SECRETS], "frozen": FROZEN, "app_switch": app_switch_state(),
             "native_prompt_dismissed": bool(cfg.get("native_prompt_dismissed")), **{k: v for k, v in versions_view().items() if k != "versions"}}
 
 
@@ -3674,6 +4099,33 @@ def api(path, body):
             threading.Thread(target=switch_to_app, kwargs={"manual": True}, daemon=True).start()
             time.sleep(0.2)
         return app_switch_state()
+    if path == "/api/mods/updates":
+        return {"job": start_job(mod_updates_job)}
+    if path == "/api/mods/updates/apply":
+        ids = body.get("instances")
+        return {"job": start_job(apply_mod_updates_job, ids if isinstance(ids, list) else None)}
+    if path == "/api/share/code":
+        return share_code(body.get("loadout"))
+    if path == "/api/share/file":
+        return share_save_file(body.get("loadout"))
+    if path == "/api/share/mrpack":
+        return {"job": start_job(mrpack_job, body.get("loadout"), body.get("version"), body.get("loader"))}
+    if path == "/api/share/preview":
+        return share_preview_code(str(body.get("code") or "")[:600_000])
+    if path == "/api/share/import":
+        return share_import(str(body.get("token") or ""), "add" if body.get("mode") == "add" else "new", body.get("name"))
+    if path == "/api/live":
+        with CFG_LOCK:
+            CFG["live_ping"] = bool(body.get("on"))
+            save_config(CFG)
+        return {"live_ping": CFG["live_ping"]}
+    if path == "/api/dev/stats":
+        return dev_stats()
+    if path == "/api/dev/leave":
+        with CFG_LOCK:
+            CFG["dev_mode"] = False
+            save_config(CFG)
+        return {"dev_mode": False}
     if path == "/api/secret/dev":
         code = body.get("code")
         time.sleep(0.6)  # keeps guessing slow
@@ -3682,8 +4134,9 @@ def api(path, body):
             return {"ok": False}
         with CFG_LOCK:
             CFG["secrets"] = list(SECRETS)
+            CFG["dev_mode"] = True
             save_config(CFG)
-        return {"ok": True, "secrets": list(SECRETS)}
+        return {"ok": True, "secrets": list(SECRETS), "dev_mode": True}
     if path == "/api/secret":
         name = body.get("name")
         if name not in SECRETS:
@@ -3891,8 +4344,8 @@ class Handler(BaseHTTPRequestHandler):
             if n <= 0 or n > 300_000_000:
                 raise UserError("That file is empty or too big.")
             name = safe_filename(urllib.parse.unquote(self.headers.get("X-Filename") or "file.jar"))
-            if not name.lower().endswith((".jar", ".zip")):
-                raise UserError(f"{name} isn't a mod (.jar) or resource pack (.zip).")
+            if not name.lower().endswith((".jar", ".zip", ".mrpack", ".modhub")):
+                raise UserError(f"{name} isn't a mod (.jar), resource pack (.zip) or modpack (.mrpack).")
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             LOCAL_DIR.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=LOCAL_DIR, suffix=Path(name).suffix)
@@ -3915,6 +4368,8 @@ class Handler(BaseHTTPRequestHandler):
                 if restore:
                     result = restore_library_backup(Path(tmp))
                     return self._send(200, {"restored": result, **state()})
+                if name.lower().endswith((".mrpack", ".modhub")):
+                    return self._send(200, {"share": share_preview_file(Path(tmp), name)})
                 want = (qs.get("version") or [None])[0]
                 res = add_local_file(Path(tmp), name, want, (qs.get("item") or [None])[0], explicit_version=bool(want))
             finally:
@@ -4755,6 +5210,8 @@ def main():
     threading.Thread(target=watch_loop, daemon=True).start()
     threading.Thread(target=crash_watch, daemon=True).start()
     threading.Thread(target=precheck_watch, daemon=True).start()
+    threading.Thread(target=mod_updates_watch, daemon=True).start()
+    threading.Thread(target=live_loop, daemon=True).start()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PREFERRED_PORT
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -5747,6 +6204,69 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 @keyframes sheetUp{from{opacity:0;transform:translateY(70px) scale(.94)}}
 :root[data-motion="fluid"] .ttile{transition:transform .45s cubic-bezier(.34,1.56,.64,1),box-shadow .3s}
 :root[data-motion="fluid"] .ttile:active{transform:scale(.95)}
+
+/* ================= 4.0: Home, mod updates, sharing ================= */
+.home-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.home-upd,.home-picks{grid-column:1 / -1}
+@media (max-width:980px){.home-grid{grid-template-columns:minmax(0,1fr)}}
+.home-grid .card{margin:0}
+.hc-h{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.hc-h h3{margin:0;font:750 17px/1.2 var(--display)}
+.hc-h small{color:var(--muted);font-size:13px}
+.hc-h .grow{flex:1;min-width:0}
+.hc-h .n{font:800 13px/1 var(--body);color:var(--accent-ink);background:var(--accent);border-radius:10px;padding:4px 9px}
+.hrow{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid rgb(var(--hi) / .06)}
+.hrow:first-of-type{border-top:0}
+.hrow .ico{width:34px;height:34px;border-radius:9px;flex:none}
+.hrow .body{flex:1;min-width:0}
+.hrow .t{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow .s{color:var(--muted);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow .ver{font-size:12.5px;color:var(--muted);white-space:nowrap}
+.hrow .ver b{color:var(--ready);font-weight:700}
+.h-empty{color:var(--muted);font-size:14px;margin:4px 0 0}
+.h-more{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+.hpicks{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.hpick{display:flex;align-items:center;gap:10px;padding:10px;border-radius:12px;background:rgb(var(--hi) / .03);border:1px solid rgb(var(--hi) / .05);cursor:pointer;text-align:left;color:inherit;font:inherit}
+.hpick:hover{border-color:var(--accent-edge)}
+.hpick .ico{width:38px;height:38px;border-radius:10px;flex:none}
+.hpick .body{flex:1;min-width:0}
+.hpick .t{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hpick .s{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.live-ask{margin-bottom:18px}
+/* updates window */
+.um-inst{margin-top:18px}
+.um-inst h4{display:flex;align-items:center;gap:10px;margin:0 0 6px;font:700 15px/1.2 var(--display)}
+.um-inst h4 small{color:var(--muted);font:500 12.5px var(--body)}
+.um-inst h4 .btn{margin-left:auto}
+.um-mod{border-top:1px solid rgb(var(--hi) / .06);padding:10px 0}
+.um-mod summary{display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none}
+.um-mod summary::-webkit-details-marker{display:none}
+.um-mod .ico{width:30px;height:30px;border-radius:8px;flex:none}
+.um-mod .t{flex:1;min-width:0;font-weight:650}
+.um-mod .ver{font-size:12.5px;color:var(--muted)}
+.um-mod .ver b{color:var(--ready)}
+.um-log{margin:8px 0 2px 40px;font-size:13px;color:var(--muted);max-height:180px;overflow:auto;white-space:pre-wrap}
+/* sharing */
+.share-tabs{margin:6px 0 18px}
+.share-h{margin:20px 0 4px;font:700 15px/1.2 var(--display)}
+.share-code{display:flex;gap:10px;align-items:stretch}
+.share-code textarea,#shareIn{flex:1;width:100%;font:12.5px/1.45 ui-monospace,Consolas,monospace;border-radius:10px;border:1px solid var(--edge);background:var(--deep);color:var(--text);padding:10px;resize:vertical;word-break:break-all}
+.share-row{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:12px 0;border-top:1px solid rgb(var(--hi) / .06)}
+.share-row b{font-weight:650}
+.share-row .help{margin:2px 0 0}
+.share-mr{display:flex;gap:8px;margin-top:8px}
+.share-mr select{min-width:0}
+.sp-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin:12px 0;max-height:240px;overflow:auto}
+.sp-list .hrow{border:0;padding:6px 0}
+.sp-mode{display:grid;gap:8px;margin:10px 0}
+/* developer */
+.dev-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:4px 0 14px}
+.dev-stats > div{background:rgb(var(--hi) / .03);border:1px solid rgb(var(--hi) / .06);border-radius:12px;padding:14px}
+.dev-n{display:block;font:800 26px/1.1 var(--display);font-variant-numeric:tabular-nums}
+.dev-l{color:var(--muted);font-size:12.5px}
+.dev-spark{display:flex;align-items:flex-end;gap:4px;height:54px;margin-bottom:8px}
+.dev-spark i{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.8}
+.dev-spark i.gap{background:rgb(var(--hi) / .1)}
 </style>
 </head>
 <body>
@@ -5755,7 +6275,10 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
   <aside class="side">
     <div class="brand"><div class="mark"><i></i><i></i><i></i><i></i></div>ModHub</div>
     <button class="kpill" id="palBtn" title="Search everything (Ctrl+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>Search<kbd>Ctrl K</kbd></button>
-    <button class="nav on" data-tab="library">
+    <button class="nav on" data-tab="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5 9.5V20h5v-6h4v6h5V9.5"/></svg>
+      Home<span class="n" id="navHome"></span></button>
+    <button class="nav" data-tab="library">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       Library<span class="n" id="navLib"></span></button>
     <button class="nav" data-tab="discover">
@@ -5792,13 +6315,31 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
     <div id="crashBox"></div>
     <div id="catchUp"></div>
     <!-- LIBRARY -->
-    <section id="tab-library">
+    <!-- HOME -->
+    <section id="tab-home">
+      <div class="page-h">
+        <div>
+          <h1 id="homeHello">Welcome back</h1>
+          <p class="lede">Here's what's going on with your mods.</p>
+        </div>
+        <div class="actions"><button class="btn" id="homeShare">Share a modpack</button></div>
+      </div>
+      <div id="liveAsk"></div>
+      <div class="home-grid">
+        <section class="card home-upd" id="homeUpd"></section>
+        <section class="card" id="homeInst"></section>
+        <section class="card" id="homeFix"></section>
+        <section class="card home-picks" id="homePicks"></section>
+      </div>
+    </section>
+
+    <section id="tab-library" class="hidden">
       <div class="page-h">
         <div>
           <h1>Library</h1>
           <p class="lede">The mods, packs and shaders you always play with.</p>
         </div>
-        <div class="actions"><button class="btn" onclick="openImport()">Import from a launcher</button></div>
+        <div class="actions"><button class="btn quiet" id="libShare">Share</button><button class="btn" onclick="openImport()">Import from a launcher</button></div>
       </div>
 
       <div class="banner warn hidden" id="nativeBanner" style="margin:0 0 24px;border-left-color:var(--accent)">
@@ -5997,6 +6538,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
           <button class="linkbtn hidden" id="updPeek"></button>
           <p class="help" id="updSourceStatus" style="margin:0"></p>
           <label class="check" style="margin:0"><input type="checkbox" id="updAuto" checked> Install updates by itself when ModHub starts</label>
+          <label class="check" style="margin:0"><input type="checkbox" id="liveOn"> Add me to ModHub's anonymous count of people using it (sends no information about you or your mods)</label>
           <div class="actions">
             <button class="btn go hidden" id="updApply">Update now</button>
             <button class="btn" id="updCheck">Check for updates</button>
@@ -6004,6 +6546,17 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
             <button class="btn quiet" id="updFile">Install from a file</button>
             <button class="btn quiet hidden" id="updUndo">Go back to the previous version</button>
           </div>
+        </section>
+        <section class="card hidden" id="devCard">
+          <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12"/></svg></span><div><h3>Developer</h3><p>Only you can see this. It's here because you entered your developer code.</p></div></div>
+          <div class="dev-stats">
+            <div><span class="dev-n" id="devLive">-</span><span class="dev-l">using ModHub right now</span></div>
+            <div><span class="dev-n" id="devDl">-</span><span class="dev-l">downloads, all versions</span></div>
+            <div><span class="dev-n" id="devLatest">-</span><span class="dev-l" id="devLatestL">downloads of the newest version</span></div>
+          </div>
+          <div class="dev-spark" id="devSpark" aria-label="People using ModHub over the last hour"></div>
+          <p class="help" id="devNote"></p>
+          <div class="actions"><button class="btn" id="devRefresh">Refresh</button><button class="btn quiet" id="devLeave">Leave developer mode</button></div>
         </section>
         <section class="card">
           <div class="card-h"><span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg></span><div><h3>Your library</h3><p>Save all your loadouts and the files you added yourself in one backup file. Restore it on another PC or after a reinstall, or drag a backup onto ModHub.</p></div></div>
@@ -6103,6 +6656,36 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 </div>
 
 <!-- add files modal -->
+<div class="scrim hidden" id="updModal" role="dialog" aria-modal="true" aria-labelledby="updMTitle">
+  <div class="modal" id="updMBody" style="width:min(680px,100%)"></div>
+</div>
+<div class="scrim hidden" id="shareModal" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+  <div class="modal" style="width:min(620px,100%)">
+    <h2 id="shareTitle">Share a modpack</h2>
+    <div class="seg share-tabs" role="tablist"><button class="on" data-stab="give" role="tab">Share yours</button><button data-stab="get" role="tab">Open a shared one</button></div>
+    <div id="shareGive">
+      <label class="lbl" for="shareLo">Loadout</label>
+      <select id="shareLo"></select>
+      <h4 class="share-h">Share code</h4>
+      <p class="help">Send this to a friend. They paste it into ModHub under Open a shared one.</p>
+      <div class="share-code"><textarea id="shareCode" readonly rows="3" aria-label="Share code"></textarea><button class="btn go" id="shareCopy">Copy</button></div>
+      <p class="help" id="shareNote"></p>
+      <h4 class="share-h">Files</h4>
+      <div class="share-row"><div><b>ModHub file</b><p class="help">The same as the code, as a file you can send.</p></div><button class="btn" id="shareFile">Save .modhub file</button></div>
+      <div class="share-row"><div><b>Modrinth modpack</b><p class="help">Opens in Prism, the Modrinth App and other launchers. Pick the version it's for.</p>
+        <div class="share-mr"><select id="shareVer" aria-label="Minecraft version"></select><select id="shareLoader" aria-label="Loader"><option value="fabric">Fabric</option><option value="quilt">Quilt</option><option value="neoforge">NeoForge</option><option value="forge">Forge</option></select></div></div>
+        <button class="btn" id="shareMr">Save .mrpack</button></div>
+      <p class="help" id="shareSaved"></p>
+    </div>
+    <div id="shareGet" class="hidden">
+      <label class="lbl" for="shareIn">Paste a share code</label>
+      <textarea id="shareIn" rows="3" placeholder="MH1-..." spellcheck="false"></textarea>
+      <div class="actions" style="margin-top:10px"><button class="btn go" id="shareOpen">Open</button><button class="btn" id="sharePick">Choose a file (.modhub or .mrpack)</button><input type="file" id="shareFileIn" accept=".modhub,.mrpack" hidden></div>
+      <div id="sharePrev"></div>
+    </div>
+    <div class="foot"><button class="btn quiet" data-close>Close</button></div>
+  </div>
+</div>
 <div class="scrim hidden" id="filesModal" role="dialog" aria-modal="true" aria-labelledby="filesTitle">
   <div class="modal">
     <h2 id="filesTitle">Add files from CurseForge</h2>
@@ -6169,7 +6752,7 @@ function toast(msg) {
 let portsPoll;
 function go(tab) {
   $$(".nav").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  ["library", "discover", "install", "instances", "ports", "settings"].forEach(t => {
+  ["home", "library", "discover", "install", "instances", "ports", "settings"].forEach(t => {
     const el = $("#tab-" + t), show = t === tab;
     const wasHidden = el.classList.contains("hidden");
     el.classList.toggle("hidden", !show);
@@ -6181,6 +6764,7 @@ function go(tab) {
   if (tab === "install" && S) { updateSteps(); loadCarry(); }
   if (tab === "instances" && S) renderInstances();
   if (tab === "discover" && S && (!discData || discStale)) loadDiscover();
+  if (tab === "home" && S) renderHome();
   window.scrollTo(0, 0);
 }
 $$(".nav").forEach(b => b.onclick = () => go(b.dataset.tab));
@@ -6439,6 +7023,11 @@ async function uploadFiles(files) {
         const {restored, ...st} = j; S = st; renderAll();
         row.innerHTML = `<div class="body"><div class="t">${esc(file.name)}</div><div class="s" style="color:var(--ready)">Restored your library from this backup. Nothing was removed.</div></div>`;
         showRestored(restored);
+        continue;
+      }
+      if (j.share) {
+        row.innerHTML = `<div class="body"><div class="t">${esc(file.name)}</div><div class="s">A shared modpack. Opening it...</div></div>`;
+        closeModals(); openShare("get"); showSharePreview(j.share);
         continue;
       }
       S.favorites = j.favorites;
@@ -8141,7 +8730,7 @@ $("#themeReset").onclick = async () => {
   try { S.theme = (await api("/api/theme", {reset: true})).theme; applyTheme(S.theme, true); renderTheme(); toast("Appearance reset"); } catch (e) { toast(e.message); }
 };
 
-function renderAll() { renderTheme(); renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
+function renderAll() { renderHome(); renderDev(); renderTheme(); renderCrashes(); renderLoadouts(); renderCatchUp(); renderInstances(); renderNewVersion(); renderUpdateBits(); renderAppBits(); renderInventory(); renderSettings(); renderLaunchers(); updateSteps(); }
 
 (async function init() {
   S = await api("/api/state");
@@ -8263,7 +8852,7 @@ function runCommand(raw) {
       const code = box.value; box.value = ""; box.disabled = true;
       try {
         const r = await api("/api/secret/dev", {code});
-        if (r.ok) { S.secrets = r.secrets; renderTheme(); blockParty(160); toast("Developer code accepted. Every secret theme is unlocked."); }
+        if (r.ok) { S.secrets = r.secrets; S.dev_mode = true; renderTheme(); renderDev(); blockParty(160); toast("Developer code accepted. Every secret theme is unlocked, and the Developer card is in Settings."); }
       } catch (e) {}
       done();
     });
@@ -8311,6 +8900,198 @@ const sheetMO = new MutationObserver(() => {
   document.documentElement.classList.toggle("sheet-open", open && FLUID());
 });
 $$(".scrim").forEach(m => sheetMO.observe(m, {attributes: true, attributeFilter: ["class"]}));
+
+/* ---------- 4.0: Home ---------- */
+let homePicks = null, homePicksFor = "", modCheckRunning = false;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+function renderHome() {
+  if (!S || !$("#tab-home")) return;
+  const h = new Date().getHours();
+  $("#homeHello").textContent = h < 5 ? "Up late?" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  const mu = S.mod_updates || null, ups = (mu && mu.items) || [];
+  const inst = (S.installs || []).filter(r => !r.export);
+  const navH = $("#navHome"); if (navH) navH.textContent = ups.length ? ups.length : "";
+  // live count question, asked once
+  $("#liveAsk").innerHTML = S.live_ping == null ? `<div class="banner live-ask"><div class="grow"><b>Count yourself in?</b><p>ModHub can add you to an anonymous count of how many people are using it. It sends nothing about you, your computer or your mods, and you can change this in Settings.</p></div><button class="btn sm go" data-live="1">Count me in</button><button class="btn sm quiet" data-live="0">No thanks</button></div>` : "";
+  $$("#liveAsk [data-live]").forEach(b => b.onclick = async () => { S.live_ping = (await api("/api/live", {on: b.dataset.live === "1"})).live_ping; renderHome(); renderSettings(); toast(S.live_ping ? "Thanks! You're counted in." : "No problem. Nothing is sent."); });
+  // updates
+  let u = `<div class="hc-h"><div class="grow"><h3>Mod updates</h3><small>${mu ? `Checked ${esc(timeAgo(mu.at))}` : inst.length ? "Not checked yet" : ""}</small></div>${ups.length ? `<span class="n">${ups.length}</span>` : ""}</div>`;
+  if (!inst.length) u += `<p class="h-empty">Install your mods once and ModHub keeps an eye on updates for them here.</p><div class="h-more"><button class="btn go" data-go="install">Install my mods</button></div>`;
+  else if (modCheckRunning) u += `<p class="h-empty"><span class="spin"></span> Checking ${plural(inst.length, "instance", "instances")} for newer versions...</p>`;
+  else if (!ups.length) u += `<p class="h-empty">${mu ? "Everything's up to date." : "ModHub hasn't looked for updates yet."}</p><div class="h-more"><button class="btn" id="homeCheck">Check now</button></div>`;
+  else {
+    u += ups.slice(0, 5).map(x => `<div class="hrow">${ico(x)}<div class="body"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.instance_name)}</div></div><div class="ver">${esc(x.from)} &rarr; <b>${esc(x.to)}</b></div></div>`).join("");
+    u += `<div class="h-more"><button class="btn go" id="homeUpdAll">Update all</button><button class="btn" id="homeUpdSee">See what's new${ups.length > 5 ? ` (${ups.length})` : ""}</button><button class="btn quiet" id="homeCheck">Check again</button></div>`;
+  }
+  $("#homeUpd").innerHTML = u;
+  // instances
+  const recent = inst.slice().sort((a, b) => (b.updated || "").localeCompare(a.updated || "")).slice(0, 4);
+  $("#homeInst").innerHTML = `<div class="hc-h"><div class="grow"><h3>Your instances</h3><small>${inst.length ? plural(inst.length, "instance", "instances") : ""}</small></div></div>`
+    + (recent.length ? recent.map(r => `<div class="hrow"><div class="ico">${esc((r.launcher_name || "?")[0])}</div><div class="body"><div class="t">${esc(r.name)}</div><div class="s">Minecraft ${esc(r.version)} with ${esc(({fabric: "Fabric", quilt: "Quilt", forge: "Forge", neoforge: "NeoForge"})[r.loader] || r.loader)}, ${esc(r.launcher_name)}</div></div><div class="ver">${esc(timeAgo(r.updated))}</div></div>`).join("")
+       + `<div class="h-more"><button class="btn" data-go="instances">See all</button></div>`
+      : `<p class="h-empty">Nothing installed yet.</p><div class="h-more"><button class="btn" data-go="install">Install</button></div>`);
+  // recent fixes
+  const fixes = (S.crashes || []).filter(c => c.autofix && (c.autofix.fixed || []).length).slice(-3).reverse();
+  $("#homeFix").innerHTML = `<div class="hc-h"><div class="grow"><h3>Recent fixes</h3><small>Problems ModHub sorted out for you</small></div></div>`
+    + (fixes.length ? fixes.map(c => `<div class="hrow"><div class="ico" style="color:var(--ready)">&#10003;</div><div class="body"><div class="t">${esc(c.instance || "An instance")}</div><div class="s">${plural((c.autofix.fixed || []).length, "fix", "fixes")}${c.kind === "precheck" ? " before you played" : " after a crash"}</div></div><div class="ver">${esc(timeAgo(c.at || c.time || ""))}</div></div>`).join("")
+      : `<p class="h-empty">Nothing's needed fixing lately. ModHub checks your mods whenever they change.</p>`);
+  // picks
+  renderHomePicks();
+  $("#homeCheck") && ($("#homeCheck").onclick = checkModUpdates);
+  $("#homeUpdAll") && ($("#homeUpdAll").onclick = () => applyModUpdates());
+  $("#homeUpdSee") && ($("#homeUpdSee").onclick = openModUpdates);
+  // look for updates when they're old
+  if (inst.length && !modCheckRunning && (!mu || Date.now() - Date.parse(mu.at) > 6 * 3600e3) && !renderHome.asked) { renderHome.asked = true; checkModUpdates(true); }
+}
+async function renderHomePicks() {
+  const box = $("#homePicks"); if (!box) return;
+  const v = (S.last || {}).version || ((S.versions || []).find(x => x.type === "release") || {}).v || "", ld = (S.last || {}).loader || S.loader || "fabric";
+  const head = `<div class="hc-h"><div class="grow"><h3>Worth a look</h3><small>${v ? `Picked for Minecraft ${esc(v)} and the mods you have` : ""}</small></div><button class="btn quiet sm" data-go="discover">Discover</button></div>`;
+  if (!S.favorites.length) { box.innerHTML = head + `<p class="h-empty">Add a few mods to your library and ModHub suggests ones that go with them.</p>`; return; }
+  const key = v + "|" + ld + "|" + S.favorites.length;
+  if (homePicks && homePicksFor === key) return paint();
+  box.innerHTML = head + `<div class="hpicks">${Array.from({length: 4}, () => `<div class="dskel" style="height:60px"></div>`).join("")}</div>`;
+  try { const d = await api("/api/discover", {kind: "mod", version: v, loader: ld}); homePicks = (d.picks && d.picks.length ? d.picks : d.popular || []).filter(m => !isFav(m)).slice(0, 6); homePicksFor = key; }
+  catch (e) { box.innerHTML = head + `<p class="h-empty">Couldn't load suggestions right now.</p>`; return; }
+  paint();
+  function paint() {
+    box.innerHTML = head + (homePicks.length ? `<div class="hpicks">${homePicks.map((m, i) => `<button class="hpick" data-hp="${i}">${ico(m)}<div class="body"><div class="t">${esc(m.name)}</div><div class="s">${esc(m.why || m.desc || "")}</div></div></button>`).join("")}</div>` : `<p class="h-empty">You've already got the popular ones. Nice.</p>`);
+    $$("#homePicks [data-hp]").forEach(b => b.onclick = () => openModPage(homePicks[+b.dataset.hp]));
+  }
+}
+async function checkModUpdates(quiet) {
+  if (modCheckRunning) return;
+  modCheckRunning = true; renderHome();
+  try {
+    const r = await follow((await api("/api/mods/updates")).job);
+    S.mod_updates = r;
+    if (quiet !== true) toast(r.items.length ? `${plural(r.items.length, "update", "updates")} waiting` : "Everything's up to date");
+  } catch (e) { if (quiet !== true) toast(e.message); }
+  modCheckRunning = false; renderHome();
+}
+function openModUpdates() {
+  const ups = (S.mod_updates || {}).items || [];
+  const by = {}; ups.forEach(x => (by[x.instance] = by[x.instance] || []).push(x));
+  $("#updMBody").innerHTML = `<h2 id="updMTitle">Mod updates</h2><p class="lede">${plural(ups.length, "newer version", "newer versions")} across ${plural(Object.keys(by).length, "instance", "instances")}. Open one to see what changed.</p>`
+    + Object.entries(by).map(([iid, list]) => `<div class="um-inst"><h4>${esc(list[0].instance_name)}<small>Minecraft ${esc(list[0].version)}</small><button class="btn sm" data-umi="${esc(iid)}">Update</button></h4>`
+      + list.map(x => `<details class="um-mod"><summary>${ico(x)}<span class="t">${esc(x.name)}</span><span class="ver">${esc(x.from)} &rarr; <b>${esc(x.to)}</b></span></summary><div class="um-log">${x.changelog ? esc(x.changelog.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/[#*`]/g, "").trim()) : "No changelog for this version."}</div></details>`).join("") + `</div>`).join("")
+    + `<div class="foot"><button class="btn quiet" data-close>Close</button><button class="btn go" id="umAll">Update all</button></div>`;
+  openModal("#updModal");
+  $("#umAll").onclick = () => { closeModals(); applyModUpdates(); };
+  $$("#updMBody [data-umi]").forEach(b => b.onclick = () => { closeModals(); applyModUpdates([b.dataset.umi]); });
+}
+async function applyModUpdates(ids) {
+  toast("Updating your mods...");
+  try {
+    const r = await follow((await api("/api/mods/updates/apply", ids ? {instances: ids} : {})).job);
+    const n = (r.summary || []).reduce((a, x) => a + ((x.updates || []).length), 0), bad = (r.summary || []).filter(x => x.error);
+    S = await api("/api/state"); renderAll();
+    toast(bad.length ? `${bad[0].name}: ${bad[0].error}` : `Updated ${plural(n, "mod", "mods")}. Restart Minecraft to use them.`);
+  } catch (e) { toast(e.message); }
+}
+$("#homeShare").onclick = () => openShare("give");
+$("#libShare").onclick = () => openShare("give");
+$("#liveOn").onchange = async e => { S.live_ping = (await api("/api/live", {on: e.target.checked})).live_ping; renderHome(); };
+
+/* ---------- 4.0: sharing ---------- */
+function openShare(tab) {
+  $("#shareLo").innerHTML = (S.loadouts || []).map(l => `<option value="${esc(l.id)}" ${l.id === S.active_loadout ? "selected" : ""}>${esc(l.name)}</option>`).join("");
+  const vs = (S.versions || []).filter(v => v.type === "release").slice(0, 40).map(v => v.v);
+  $("#shareVer").innerHTML = vs.map(v => `<option>${esc(v)}</option>`).join("");
+  if ((S.last || {}).version && vs.includes(S.last.version)) $("#shareVer").value = S.last.version;
+  $("#shareLoader").value = (S.last || {}).loader || S.loader || "fabric";
+  $("#shareSaved").textContent = ""; $("#sharePrev").innerHTML = ""; $("#shareIn").value = "";
+  shareTab(tab || "give"); openModal("#shareModal"); settle();
+  if ((tab || "give") === "give") loadShareCode();
+}
+function shareTab(t) {
+  $$("[data-stab]").forEach(b => { b.classList.toggle("on", b.dataset.stab === t); b.setAttribute("aria-selected", b.dataset.stab === t); });
+  $("#shareGive").classList.toggle("hidden", t !== "give"); $("#shareGet").classList.toggle("hidden", t !== "get"); settle();
+}
+$$("[data-stab]").forEach(b => b.onclick = () => { shareTab(b.dataset.stab); if (b.dataset.stab === "give") loadShareCode(); });
+async function loadShareCode() {
+  $("#shareCode").value = ""; $("#shareNote").textContent = "";
+  try {
+    const r = await api("/api/share/code", {loadout: $("#shareLo").value});
+    $("#shareCode").value = r.code;
+    $("#shareNote").textContent = `${plural(r.count, "mod", "mods")} from ${r.name}.` + (r.own ? ` ${plural(r.own, "file you added yourself isn't", "files you added yourself aren't")} included. Share a .mrpack to bring them along.` : "");
+  } catch (e) { $("#shareNote").textContent = e.message; }
+}
+$("#shareLo").onchange = loadShareCode;
+$("#shareCopy").onclick = async () => { const t = $("#shareCode").value; if (!t) return; try { await navigator.clipboard.writeText(t); } catch (e) { $("#shareCode").select(); document.execCommand("copy"); } toast("Share code copied"); };
+function savedLine(r) {
+  $("#shareSaved").innerHTML = `Saved <b>${esc(r.file)}</b> in your ${esc(r.where)} folder. <button class="linkbtn" id="shareShow">Show it</button>`;
+  $("#shareShow").onclick = () => api("/api/open", {path: r.path}).catch(e => toast(e.message));
+}
+$("#shareFile").onclick = async () => { try { savedLine(await api("/api/share/file", {loadout: $("#shareLo").value})); } catch (e) { toast(e.message); } };
+$("#shareMr").onclick = async () => {
+  const b = $("#shareMr"); b.disabled = true; $("#shareSaved").innerHTML = `<span class="spin"></span> Making the modpack...`;
+  try {
+    const r = await follow((await api("/api/share/mrpack", {loadout: $("#shareLo").value, version: $("#shareVer").value, loader: $("#shareLoader").value})).job);
+    savedLine(r);
+    if ((r.left_out || []).length) $("#shareSaved").insertAdjacentHTML("beforeend", `<br>Left out because they aren't out for ${esc($("#shareVer").value)} yet: ${r.left_out.map(x => esc(x.name)).join(", ")}.`);
+  } catch (e) { $("#shareSaved").textContent = e.message; }
+  b.disabled = false;
+};
+$("#shareOpen").onclick = async () => {
+  const code = $("#shareIn").value.trim(); if (!code) return $("#shareIn").focus();
+  $("#sharePrev").innerHTML = `<p class="help"><span class="spin"></span> Looking up the mods...</p>`;
+  try { showSharePreview(await api("/api/share/preview", {code})); } catch (e) { $("#sharePrev").innerHTML = `<p class="help" style="color:var(--missing)">${esc(e.message)}</p>`; }
+};
+$("#sharePick").onclick = () => $("#shareFileIn").click();
+$("#shareFileIn").onchange = async e => {
+  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+  $("#sharePrev").innerHTML = `<p class="help"><span class="spin"></span> Reading ${esc(file.name)}...</p>`;
+  try {
+    const r = await fetch("/api/local/upload", {method: "POST", headers: {"X-Token": T, "X-Filename": encodeURIComponent(file.name)}, body: file});
+    const j = await r.json().catch(() => ({error: r.statusText}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    if (!j.share) throw new Error("That file isn't a shared modpack.");
+    showSharePreview(j.share);
+  } catch (err) { $("#sharePrev").innerHTML = `<p class="help" style="color:var(--missing)">${esc(err.message)}</p>`; }
+};
+function showSharePreview(p) {
+  const active = (S.loadouts || []).find(l => l.id === S.active_loadout) || {name: "your library"};
+  const n = p.items.length + (p.own || []).length;
+  $("#sharePrev").innerHTML = `<h4 class="share-h">${esc(p.name)}</h4><p class="help">${plural(n, "item", "items")}${p.missing ? `. ${plural(p.missing, "mod couldn't", "mods couldn't")} be found on Modrinth and won't be added` : ""}.</p>
+    <div class="sp-list">${p.items.map(m => `<div class="hrow">${ico(m)}<div class="body"><div class="t">${esc(m.name)}</div></div></div>`).join("")}${(p.own || []).map(f => `<div class="hrow"><div class="ico">+</div><div class="body"><div class="t">${esc(f)}</div><div class="s">Included file</div></div></div>`).join("")}</div>
+    <div class="sp-mode"><label class="check"><input type="radio" name="spMode" value="new" checked> Add as a new loadout called <input id="spName" value="${esc(p.name)}" maxlength="40" style="margin-left:6px;width:200px"></label>
+    <label class="check"><input type="radio" name="spMode" value="add"> Add to ${esc(active.name)}</label></div>
+    <div class="actions"><button class="btn go" id="spGo">Add to ModHub</button></div>`;
+  $("#spGo").onclick = async () => {
+    try {
+      const mode = ($("input[name=spMode]:checked") || {}).value || "new";
+      const r = await api("/api/share/import", {token: p.token, mode, name: $("#spName").value.trim()});
+      const {added, own, loadout, ...st} = r; S = st; renderAll(); closeModals(); go("library");
+      toast(`Added ${plural(added + own, "item", "items")} to ${loadout}`);
+    } catch (e) { toast(e.message); }
+  };
+}
+
+/* ---------- 4.0: developer stats ---------- */
+let devTimer = null;
+function renderDev() {
+  const card = $("#devCard"); if (!card || !S) return;
+  card.classList.toggle("hidden", !S.dev_mode);
+  if ($("#liveOn")) $("#liveOn").checked = S.live_ping === true;
+  clearInterval(devTimer);
+  if (S.dev_mode) { loadDev(); devTimer = setInterval(() => { if (!$("#tab-settings").classList.contains("hidden")) loadDev(); }, 60000); }
+}
+async function loadDev() {
+  try {
+    const d = await api("/api/dev/stats");
+    const f = n => n == null ? "-" : Number(n).toLocaleString();
+    $("#devLive").textContent = d.reachable ? f(d.live) : "-";
+    $("#devDl").textContent = f(d.downloads);
+    $("#devLatest").textContent = d.latest ? f(d.latest.downloads) : "-";
+    $("#devLatestL").textContent = d.latest ? `downloads of ${d.latest.tag}` : "downloads of the newest version";
+    const max = Math.max(1, ...d.history.filter(x => x != null));
+    $("#devSpark").innerHTML = d.history.map(x => x == null ? `<i class="gap" style="height:4px"></i>` : `<i style="height:${Math.max(4, x / max * 54)}px" title="${x}"></i>`).join("");
+    $("#devNote").textContent = d.reachable ? `The last hour, 5 minutes at a time. Only people who said yes to being counted are included. Updated ${timeAgo(d.at)}.` : "Couldn't reach the live counter right now.";
+  } catch (e) { $("#devNote").textContent = e.message; }
+}
+$("#devRefresh").onclick = loadDev;
+$("#devLeave").onclick = async () => { await api("/api/dev/leave"); S.dev_mode = false; renderDev(); toast("Left developer mode. Your dev code brings it back."); };
 </script>
 </body>
 </html>
