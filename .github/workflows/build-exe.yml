@@ -36,10 +36,12 @@ jobs:
       - name: Build ModHub.exe
         run: >-
           pyinstaller --noconfirm --clean --onefile --windowed
-          --name ModHub --icon build/modhub.ico --version-file build/version.txt --noupx
+          --name ModHub --icon build/modhub.ico --version-file build/version.txt --manifest build/modhub.manifest --noupx
           --add-data "modhub.py;." --paths .
           --collect-all webview --collect-all pythonnet --collect-all clr_loader
           --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
+          --exclude-module tkinter --exclude-module numpy --exclude-module PIL --exclude-module matplotlib
+          --exclude-module pandas --exclude-module scipy --exclude-module pytest --exclude-module test --exclude-module unittest
           exe/launcher.py
       - name: Scan it with Microsoft Defender
         shell: pwsh

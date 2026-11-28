@@ -52,6 +52,29 @@ vt = tuple(nums)
 )
 """, "utf-8")
 
+# Windows application manifest: gives the .exe a real app identity and name, instead of the
+# generic unnamed PyInstaller binary that heuristic scanners treat as suspicious.
+mvers = ".".join(str(n) for n in (vt))
+(out / "modhub.manifest").write_text(f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="ModHub.ModHub" version="{mvers}" processorArchitecture="amd64"/>
+  <description>ModHub - installs your Minecraft mods into any Minecraft version</description>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
+      <supportedOS Id="{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}"/>
+    </application>
+  </compatibility>
+</assembly>
+""", "utf-8")
+
 # icon: ModHub draws its own
 sys.path.insert(0, str(root))
 import modhub  # noqa: E402
