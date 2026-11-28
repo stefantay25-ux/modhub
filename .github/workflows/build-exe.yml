@@ -35,6 +35,19 @@ jobs:
           --collect-all webview --collect-all pythonnet --collect-all clr_loader
           --hidden-import clr --hidden-import webview.platforms.edgechromium --hidden-import webview.platforms.winforms
           exe/launcher.py
+      - name: Scan it with Microsoft Defender
+        shell: pwsh
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          & $mp -SignatureUpdate | Out-Host
+          $st = Get-MpComputerStatus
+          & $mp -Scan -ScanType 3 -File "$PWD\dist\ModHub.exe" -DisableRemediation | Out-Host
+          $code = $LASTEXITCODE
+          $result = if ($code -eq 0) { "clean" } elseif ($code -eq 2) { "threat" } else { "error" }
+          @{ engine = "Microsoft Defender"; result = $result; version = "$($st.AntivirusSignatureVersion)"; files = @("ModHub.exe") } | ConvertTo-Json -Compress | Set-Content build/defender.json -Encoding utf8
+          Write-Host "Microsoft Defender: $result (definitions $($st.AntivirusSignatureVersion))"
+          if ($result -eq "threat") { Write-Host "Defender flagged ModHub.exe, so it won't be published."; exit 1 }
+          exit 0
       - name: Check that it starts
         shell: pwsh
         run: |
@@ -108,6 +121,7 @@ jobs:
           path: |
             dist/ModHub.exe
             build/notes.md
+            build/defender.json
 
   mac:
     strategy:
@@ -179,6 +193,53 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: out
+      - name: Scan everything with ClamAV
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clamav > /dev/null
+          sudo systemctl stop clamav-freshclam 2>/dev/null || true
+          sudo freshclam --quiet || sudo freshclam
+          mkdir scan
+          cp out/windows/dist/ModHub.exe scan/
+          for z in ModHub-mac.zip ModHub-mac-intel.zip; do [ -f "out/$z/$z" ] && cp "out/$z/$z" scan/; done
+          set +e; clamscan --scan-archive=yes --max-filesize=200M --max-scansize=400M -r scan | tee clam.txt; code=${PIPESTATUS[0]}; set -e
+          ver=$(clamscan --version)
+          if [ "$code" = "0" ]; then r=clean; elif [ "$code" = "1" ]; then r=threat; else r=error; fi
+          echo "{\"engine\":\"ClamAV\",\"result\":\"$r\",\"version\":\"$ver\"}" > clam.json
+          echo "ClamAV: $r ($ver)"
+          if [ "$r" = "threat" ]; then echo "ClamAV flagged a file, so nothing will be published."; exit 1; fi
+      - name: Check with VirusTotal (if a key is set up)
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        run: |
+          echo "[]" > vt.json
+          if [ -z "$VT_API_KEY" ]; then echo "No VT_API_KEY secret, skipping VirusTotal."; exit 0; fi
+          python3 - <<'PY'
+          import json, os, time, hashlib, urllib.request, uuid, pathlib
+          key = os.environ["VT_API_KEY"]; out = []
+          def call(url, data=None, ctype=None):
+              req = urllib.request.Request(url, data=data, headers={"x-apikey": key, **({"Content-Type": ctype} if ctype else {})})
+              with urllib.request.urlopen(req, timeout=300) as r: return json.load(r)
+          for f in sorted(pathlib.Path("scan").iterdir()):
+              sha = hashlib.sha256(f.read_bytes()).hexdigest()
+              try:
+                  up = call("https://www.virustotal.com/api/v3/files/upload_url")["data"]
+                  b = uuid.uuid4().hex
+                  body = (f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{f.name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode() + f.read_bytes() + f"\r\n--{b}--\r\n".encode()
+                  aid = call(up, body, f"multipart/form-data; boundary={b}")["data"]["id"]
+                  stats = None
+                  for _ in range(40):
+                      time.sleep(20)
+                      a = call(f"https://www.virustotal.com/api/v3/analyses/{aid}")["data"]["attributes"]
+                      if a["status"] == "completed": stats = a["stats"]; break
+                  if stats:
+                      out.append({"file": f.name, "sha256": sha, "flagged": stats.get("malicious", 0), "suspicious": stats.get("suspicious", 0),
+                                  "engines": sum(stats.get(k, 0) for k in ("malicious", "suspicious", "undetected", "harmless")),
+                                  "link": f"https://www.virustotal.com/gui/file/{sha}"})
+                      print(f.name, stats)
+              except Exception as e:
+                  print("VirusTotal skipped", f.name, e)
+          json.dump(out, open("vt.json", "w"))
+          PY
       - name: Publish on the Releases page
         env:
           GH_TOKEN: ${{ github.token }}
@@ -189,9 +250,29 @@ jobs:
           for z in ModHub-mac.zip ModHub-mac-intel.zip; do
             [ -f "out/$z/$z" ] && files="$files out/$z/$z"
           done
+          python3 - <<'PY'
+          import json, hashlib, pathlib, datetime
+          d = json.loads(pathlib.Path("out/windows/build/defender.json").read_text(encoding="utf-8-sig"))
+          c = json.loads(pathlib.Path("clam.json").read_text())
+          vt = json.loads(pathlib.Path("vt.json").read_text())
+          files = [{"file": f.name, "sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "size": f.stat().st_size} for f in sorted(pathlib.Path("scan").iterdir())]
+          scan = {"date": datetime.date.today().isoformat(), "scanners": [d, c], "files": files, "virustotal": vt}
+          word = {"clean": "no threats found", "threat": "flagged", "error": "couldn't finish"}
+          lines = ["", "## Safety scan", "",
+                   f"Every download was scanned on {scan['date']} before it was published.", "",
+                   f"- **Microsoft Defender** ({d.get('version', '')}): {word.get(d['result'], d['result'])} in ModHub.exe",
+                   f"- **ClamAV** ({c.get('version', '')}): {word.get(c['result'], c['result'])} in every file"]
+          for v in vt:
+              lines.append(f"- **VirusTotal**, {v['file']}: {v['flagged']} of {v['engines']} engines flagged it ([full report]({v['link']}))")
+          lines += ["", "SHA-256 checksums, so you can check your download is the real one:", "", "```"]
+          lines += [f"{x['sha256']}  {x['file']}" for x in files] + ["```", "", "<!-- modhub-scan " + json.dumps(scan) + " -->"]
+          notes = pathlib.Path("out/windows/build/notes.md").read_text(encoding="utf-8")
+          pathlib.Path("notes-full.md").write_text(notes.rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
+          PY
           echo "Publishing $tag: $files"
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release upload "$tag" $files --clobber
+            gh release edit "$tag" --notes-file notes-full.md
           else
-            gh release create "$tag" $files --title "ModHub $v" --notes-file out/windows/build/notes.md --latest
+            gh release create "$tag" $files --title "ModHub $v" --notes-file notes-full.md --latest
           fi
