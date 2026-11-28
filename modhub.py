@@ -53,10 +53,14 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.8"
+APP_VERSION = "3.8.1"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.8.1", "notes": [
+        "Fluid animations are now the standard: pages glide in, big titles shrink as you scroll, cards ease into view and pop-ups slide up like sheets.",
+        "If you'd set Animations to Fewer or Off, that's kept. You can switch to the older Classic animations in More options any time.",
+    ]},
     {"version": "3.8", "notes": [
         "A cleaner, fresher look: more breathing room, shorter page intros, softer cards and a tidier sidebar.",
         "What's new now lives in the sidebar, under How to use, instead of floating over the page.",
@@ -382,7 +386,13 @@ def load_config():
     cfg.setdefault("watch", {})
     cfg.setdefault("caught_up", [])
     cfg.setdefault("crashes", [])
-    if had_cf:
+    migrated = False
+    if not cfg.get("fluid_default"):  # 3.8.1: Fluid animations became the default, so move everyone still on the old default
+        cfg["fluid_default"] = True
+        if isinstance(cfg.get("theme"), dict) and cfg["theme"].get("motion", "full") == "full":
+            cfg["theme"]["motion"] = "fluid"
+        migrated = CONFIG_PATH.exists()
+    if had_cf or migrated:
         try:
             save_config(cfg)  # wipe the old CurseForge key from disk
         except OSError:
@@ -3100,7 +3110,7 @@ THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain", "aurora", "stars",
                  "radius": ("sharp", "rounded", "round"), "side": ("glass", "solid"),
                  "size": ("90", "100", "110", "120"), "motion": ("fluid", "full", "less", "off")}
 THEME_DEFAULTS = {"mode": "dark", "accent": "crimson", "custom": "#d7263d", "bg": "gradient", "dir": "top", "strength": 55,
-                  "radius": "rounded", "side": "glass", "size": "100", "motion": "full", "font": "normal"}
+                  "radius": "rounded", "side": "glass", "size": "100", "motion": "fluid", "font": "normal"}
 
 
 def theme_of(cfg):
@@ -5732,9 +5742,9 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
 :root[data-motion="fluid"] .btn:active{transform:scale(.95)}
 :root[data-motion="fluid"] .app{transition:transform .55s cubic-bezier(.2,.9,.2,1),border-radius .55s,filter .55s;transform-origin:50% 0}
 :root[data-motion="fluid"].sheet-open .app{transform:scale(.955) translateY(14px);border-radius:18px;overflow:hidden;filter:brightness(.8)}
-:root[data-motion="fluid"] .scrim{background:rgb(0 0 0 / calc(.45 * var(--shk)));animation:fadeIn .35s ease;align-items:end;padding-bottom:0}
-:root[data-motion="fluid"] .scrim .modal{animation:sheetUp .6s cubic-bezier(.2,.95,.2,1) both;border-radius:22px 22px 0 0;margin-bottom:0}
-@keyframes sheetUp{from{transform:translateY(100%)}}
+:root[data-motion="fluid"] .scrim{background:rgb(0 0 0 / calc(.45 * var(--shk)));animation:fadeIn .35s ease}
+:root[data-motion="fluid"] .scrim .modal{animation:sheetUp .55s cubic-bezier(.2,.95,.25,1.04) both;border-radius:20px}
+@keyframes sheetUp{from{opacity:0;transform:translateY(70px) scale(.94)}}
 :root[data-motion="fluid"] .ttile{transition:transform .45s cubic-bezier(.34,1.56,.64,1),box-shadow .3s}
 :root[data-motion="fluid"] .ttile:active{transform:scale(.95)}
 </style>
@@ -5976,7 +5986,7 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
                 <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
                 <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
                 <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio" title="Small">S</button><button data-v="100" role="radio" title="Normal">M</button><button data-v="110" role="radio" title="Large">L</button><button data-v="120" role="radio" title="Larger">XL</button></div></div>
-                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="fluid" role="radio" title="A smoother, Apple-style feel. Still being tried out.">Fluid (try it)</button><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="fluid" role="radio" title="Smooth, Apple-style animations">Fluid</button><button data-v="full" role="radio" title="The animations from before 3.8.1">Classic</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
                 <div class="opt reset"><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
               </div>
             </div>
@@ -8010,7 +8020,7 @@ const ACCENTS = [["crimson", "Crimson", "#d7263d"], ["rose", "Rose", "#d62976"],
 const SECRET_ACCENTS = [["lime", "Retro green", "#4ac440", "#228024", "retro"], ["rainbow", "Rainbow", "#7c3aed", "#ec4899", "rainbow"],
   ["diamond", "Diamond", "#22d3ee", "#0e7490", "diamond"], ["owl", "Night owl", "#f5b032", "#1e3078", "nightowl"], ["mono", "Void", "#d6d6de", "#5a5a64", "void"],
   ["ghost", "Ghost", "#808ca8", "#60688c", "ghost"], ["gold", "Gold", "#eaaa08", "#925806", "golden"], ["redstone", "Redstone", "#e41824", "#6e0008", "redstone"]];
-const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "full", font: "normal"};
+const THEME_DEFAULT = {mode: "dark", accent: "crimson", custom: "#d7263d", bg: "gradient", dir: "top", strength: 55, radius: "rounded", side: "glass", size: "100", motion: "fluid", font: "normal"};
 const lightQuery = matchMedia("(prefers-color-scheme: light)");
 function accentTriplets(hex) {
   const n = parseInt(hex.slice(1), 16), c = [n >> 16 & 255, n >> 8 & 255, n & 255];
