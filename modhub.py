@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0.7"
+APP_VERSION = "4.0.8"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -2323,7 +2323,7 @@ def dev_stats():
         hist = list(pool.map(get, [now - i for i in range(12, -1, -1)]))  # the last hour, 5 minutes at a time
     downloads, latest = None, None
     try:
-        rels = http_json("GET", f"https://api.github.com/repos/{DEFAULT_UPDATE_SOURCE}/releases?per_page=100") or []
+        rels = _gh_read(f"repos/{REPO}/releases?per_page=100") or []
         downloads = sum(a.get("download_count", 0) for r in rels for a in r.get("assets", []))
         latest = {"tag": rels[0].get("tag_name"), "downloads": sum(a.get("download_count", 0) for a in rels[0].get("assets", []))} if rels else None
     except Exception:
@@ -2364,7 +2364,32 @@ def _gh(path, method="GET", body=None, token=None):
     hdrs = {"Accept": "application/vnd.github+json"}
     if token:
         hdrs["Authorization"] = f"Bearer {token}"
-    return http_json(method, f"https://api.github.com/{path}", body, headers=hdrs)
+    return http_json(method, f"https://api.github.com/{path}", body, headers=hdrs, retries=1 if method == "GET" else 2)
+
+
+GH_CACHE = {}
+GH_CACHE_SECONDS = 600
+
+
+def _gh_read(path):
+    """GitHub allows 60 unsigned requests an hour, so keep answers for 10 minutes, sign in with the
+    developer's token when there is one, and fall back to the last answer if the limit is hit."""
+    hit = GH_CACHE.get(path)
+    if hit and time.time() - hit[0] < GH_CACHE_SECONDS:
+        return hit[1]
+    with CFG_LOCK:
+        token = CFG.get("dev_github_token")
+    try:
+        data = _gh(path, token=token)
+    except Exception as e:
+        if hit:
+            return hit[1]
+        if "403" in str(e) or "429" in str(e) or "rate limit" in str(e).lower():
+            raise UserError("GitHub's hourly limit for checks was reached. It resets within the hour"
+                            + ("" if token else ". Adding your GitHub token in Announcements raises the limit a lot") + ".")
+        raise UserError("Couldn't reach GitHub right now. Try again in a minute.")
+    GH_CACHE[path] = (time.time(), data)
+    return data
 
 
 def _abacus(key):
@@ -2397,7 +2422,7 @@ def dev_history(view):
 
 def dev_downloads():
     _need_dev("downloads")
-    rels = _gh(f"repos/{REPO}/releases?per_page=100") or []
+    rels = _gh_read(f"repos/{REPO}/releases?per_page=100") or []
     kinds = {"ModHub.exe": "windows", "ModHub-mac.zip": "mac", "ModHub-mac-intel.zip": "mac", "ModHub-linux.tar.gz": "linux"}
     total = {"windows": 0, "mac": 0, "linux": 0}
     rows = []
@@ -2414,7 +2439,7 @@ def dev_downloads():
 
 def dev_versions():
     _need_dev("versions")
-    commits = _gh(f"repos/{REPO}/commits?path=modhub.py&per_page=100") or []
+    commits = _gh_read(f"repos/{REPO}/commits?path=modhub.py&per_page=100") or []
     seen, out = set(), []
     for c in commits:
         m = re.match(r"ModHub (\d+(?:\.\d+)+)\b", (c.get("commit") or {}).get("message", ""))
