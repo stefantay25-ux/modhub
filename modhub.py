@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.0.1"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
@@ -62,7 +62,6 @@ APP_CHANGES = [
         "Mod updates in one place: ModHub checks every instance for newer versions of your mods, shows what changed in each one, and updates them all in one click.",
         "Share your modpack: send a friend a share code or a .modhub file, and they can add your whole loadout in one click.",
         "Export a Modrinth .mrpack that opens in Prism, the Modrinth App and other launchers, and open .mrpack files from anywhere to add them to ModHub. Drag one onto the window, or use Share.",
-        "You can choose to be counted in ModHub's anonymous count of people using it. It's off unless you say yes, and you can change it in Settings.",
     ]},
     {"version": "3.8.1", "notes": [
         "Fluid animations are now the standard: pages glide in, big titles shrink as you scroll, cards ease into view and pop-ups slide up like sheets.",
@@ -2287,7 +2286,7 @@ def live_loop():
         try:
             b = int(time.time() // LIVE_BUCKET)
             with CFG_LOCK:
-                ok = CFG.get("live_ping") is True
+                ok = CFG.get("live_ping") is not False  # a simple tally; anyone who said no earlier stays out
             if ok and LIVE_URL and b != sent:
                 req = urllib.request.Request(f"{LIVE_URL}/hit/{LIVE_NS}/live-{b}", headers={"User-Agent": USER_AGENT})
                 urllib.request.urlopen(req, timeout=15).read(200)
@@ -6324,7 +6323,6 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
         </div>
         <div class="actions"><button class="btn" id="homeShare">Share a modpack</button></div>
       </div>
-      <div id="liveAsk"></div>
       <div class="home-grid">
         <section class="card home-upd" id="homeUpd"></section>
         <section class="card" id="homeInst"></section>
@@ -6538,7 +6536,6 @@ h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
           <button class="linkbtn hidden" id="updPeek"></button>
           <p class="help" id="updSourceStatus" style="margin:0"></p>
           <label class="check" style="margin:0"><input type="checkbox" id="updAuto" checked> Install updates by itself when ModHub starts</label>
-          <label class="check" style="margin:0"><input type="checkbox" id="liveOn"> Add me to ModHub's anonymous count of people using it (sends no information about you or your mods)</label>
           <div class="actions">
             <button class="btn go hidden" id="updApply">Update now</button>
             <button class="btn" id="updCheck">Check for updates</button>
@@ -8912,8 +8909,6 @@ function renderHome() {
   const inst = (S.installs || []).filter(r => !r.export);
   const navH = $("#navHome"); if (navH) navH.textContent = ups.length ? ups.length : "";
   // live count question, asked once
-  $("#liveAsk").innerHTML = S.live_ping == null ? `<div class="banner live-ask"><div class="grow"><b>Count yourself in?</b><p>ModHub can add you to an anonymous count of how many people are using it. It sends nothing about you, your computer or your mods, and you can change this in Settings.</p></div><button class="btn sm go" data-live="1">Count me in</button><button class="btn sm quiet" data-live="0">No thanks</button></div>` : "";
-  $$("#liveAsk [data-live]").forEach(b => b.onclick = async () => { S.live_ping = (await api("/api/live", {on: b.dataset.live === "1"})).live_ping; renderHome(); renderSettings(); toast(S.live_ping ? "Thanks! You're counted in." : "No problem. Nothing is sent."); });
   // updates
   let u = `<div class="hc-h"><div class="grow"><h3>Mod updates</h3><small>${mu ? `Checked ${esc(timeAgo(mu.at))}` : inst.length ? "Not checked yet" : ""}</small></div>${ups.length ? `<span class="n">${ups.length}</span>` : ""}</div>`;
   if (!inst.length) u += `<p class="h-empty">Install your mods once and ModHub keeps an eye on updates for them here.</p><div class="h-more"><button class="btn go" data-go="install">Install my mods</button></div>`;
@@ -8991,7 +8986,6 @@ async function applyModUpdates(ids) {
 }
 $("#homeShare").onclick = () => openShare("give");
 $("#libShare").onclick = () => openShare("give");
-$("#liveOn").onchange = async e => { S.live_ping = (await api("/api/live", {on: e.target.checked})).live_ping; renderHome(); };
 
 /* ---------- 4.0: sharing ---------- */
 function openShare(tab) {
@@ -9073,7 +9067,6 @@ let devTimer = null;
 function renderDev() {
   const card = $("#devCard"); if (!card || !S) return;
   card.classList.toggle("hidden", !S.dev_mode);
-  if ($("#liveOn")) $("#liveOn").checked = S.live_ping === true;
   clearInterval(devTimer);
   if (S.dev_mode) { loadDev(); devTimer = setInterval(() => { if (!$("#tab-settings").classList.contains("hidden")) loadDev(); }, 60000); }
 }
@@ -9087,7 +9080,7 @@ async function loadDev() {
     $("#devLatestL").textContent = d.latest ? `downloads of ${d.latest.tag}` : "downloads of the newest version";
     const max = Math.max(1, ...d.history.filter(x => x != null));
     $("#devSpark").innerHTML = d.history.map(x => x == null ? `<i class="gap" style="height:4px"></i>` : `<i style="height:${Math.max(4, x / max * 54)}px" title="${x}"></i>`).join("");
-    $("#devNote").textContent = d.reachable ? `The last hour, 5 minutes at a time. Only people who said yes to being counted are included. Updated ${timeAgo(d.at)}.` : "Couldn't reach the live counter right now.";
+    $("#devNote").textContent = d.reachable ? `The last hour, 5 minutes at a time. Updated ${timeAgo(d.at)}.` : "Couldn't reach the live counter right now.";
   } catch (e) { $("#devNote").textContent = e.message; }
 }
 $("#devRefresh").onclick = loadDev;
