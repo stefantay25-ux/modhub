@@ -53,10 +53,16 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.7.3"
+APP_VERSION = "3.8"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.8", "notes": [
+        "A cleaner, fresher look: more breathing room, shorter page intros, softer cards and a tidier sidebar.",
+        "What's new now lives in the sidebar, under How to use, instead of floating over the page.",
+        "Try the new Fluid animations (Settings, More options, Animations): pages glide in, big titles shrink as you scroll, cards ease into view, and pop-ups slide up like sheets. It's a trial, so tell us what you think.",
+        "Fixed the ModHub logo spinning forever after you clicked it.",
+    ]},
     {"version": "3.7.3", "notes": [
         "One more secret theme is hiding somewhere in ModHub. This one comes with its own blocky font.",
     ]},
@@ -3092,7 +3098,7 @@ DEV_SALT = "06fbacc3e74c6ab2b71ad339b4f2bf6b"  # only a one-way fingerprint of t
 DEV_HASH = "785800f460486ebdec61b52f897a6994a058e8b9e59406edd7b007c0427bb2a6"
 THEME_CHOICES = {"bg": ("gradient", "vivid", "glow", "plain", "aurora", "stars", "embers", "pulse"), "font": ("normal", "mono", "pixel"), "dir": ("top", "corner", "side", "bottom"),
                  "radius": ("sharp", "rounded", "round"), "side": ("glass", "solid"),
-                 "size": ("90", "100", "110", "120"), "motion": ("full", "less", "off")}
+                 "size": ("90", "100", "110", "120"), "motion": ("fluid", "full", "less", "off")}
 THEME_DEFAULTS = {"mode": "dark", "accent": "crimson", "custom": "#d7263d", "bg": "gradient", "dir": "top", "strength": 55,
                   "radius": "rounded", "side": "glass", "size": "100", "motion": "full", "font": "normal"}
 
@@ -5630,7 +5636,7 @@ body,.ap-prev{background-color:var(--stone)}
 .fx.rain i{width:2px;height:16px;border-radius:0;background:rgb(130 170 255 / .55);animation:drop .7s linear infinite;animation-delay:var(--d)}
 .fx.snow i{width:5px;height:5px;border-radius:1px;background:rgb(255 255 255 / .85);animation:drop var(--t,7s) linear infinite;animation-delay:var(--d)}
 @keyframes drop{from{transform:translateY(-20px)}to{transform:translate(var(--x,0),105vh)}}
-.brand.spin .mark{animation:bspin .9s cubic-bezier(.3,1.4,.5,1)}
+.brand.twirl .mark{animation:bspin .9s cubic-bezier(.3,1.4,.5,1)}
 @keyframes bspin{to{transform:rotate(1turn) scale(1)}}
 .ttile.secret small::before{content:"\2605 ";}
 .ttile[data-preset="redstone"] b{font-family:"ModHub Blocks",monospace;font-weight:400;font-synthesis:none;letter-spacing:.03em}
@@ -5690,6 +5696,47 @@ details.card:not([open]){gap:0}
 .sw input[type=color]{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
 .sw{position:relative}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none !important;transition:none !important}}
+
+/* ================= 3.8: cleaner, fresher ================= */
+main{padding:44px 56px 90px;max-width:1120px}
+.page-h{margin-bottom:30px;align-items:flex-end}
+h1{font-size:36px;letter-spacing:-.8px;margin-bottom:6px}
+.lede{font-size:15px;color:var(--muted);max-width:56ch}
+.side{padding:24px 14px 18px;gap:2px;border-right:1px solid rgb(var(--hi) / .05)}
+.brand{padding:4px 10px 26px}
+.nav{padding:9px 12px;font-size:14.5px;border-radius:10px}
+#navPill{border-radius:10px;box-shadow:inset 0 0 0 1px rgb(var(--hi) / .06),0 8px 20px -12px rgb(0 0 0 / calc(.8 * var(--shk)))}
+#navPill::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+.side .foot{gap:2px;padding:10px 0 0;border-top:1px solid rgb(var(--hi) / .05)}
+.side .foot .help-btn{text-decoration:none;font-size:13.5px;color:var(--muted);padding:8px 12px;border-radius:8px;position:relative}
+.side .foot .help-btn:hover{color:var(--text);background:rgb(var(--hi) / .04)}
+.side .foot .help-btn svg{width:16px;height:16px;flex:none}
+.wn-side .wn-dot{position:static;margin-left:auto;width:8px;height:8px;border:0}
+.version{padding:6px 12px 0;margin:0}
+:is(.results,.inst,.lopt,.dcard,.card,.empty,.starter,.mp-status,.scanbox){border-radius:16px;border-color:rgb(var(--hi) / .07)}
+.card{padding:22px 24px}
+.btn{border-radius:10px}
+.banner{border-radius:14px}
+.res{padding:14px 18px}
+.empty{padding:44px 24px}
+.group-h{margin-top:34px}
+/* ================= 3.8: Fluid motion (a trial of Apple-style animation) ================= */
+:root[data-motion="fluid"] section.enter{animation:fluidIn .6s cubic-bezier(.2,.9,.2,1) both}
+@keyframes fluidIn{from{opacity:0;transform:translateY(22px) scale(.985);filter:blur(6px)}}
+:root[data-motion="fluid"] #navPill{transition:top .55s cubic-bezier(.34,1.45,.5,1),height .55s cubic-bezier(.34,1.45,.5,1)}
+:root[data-motion="fluid"] .seg .segpill{transition:left .5s cubic-bezier(.34,1.45,.5,1),width .5s cubic-bezier(.34,1.45,.5,1),opacity .2s}
+:root[data-motion="fluid"] main h1{transform-origin:left bottom;will-change:transform,opacity}
+:root[data-motion="fluid"] .fl-pre{opacity:0;transform:translateY(26px) scale(.97)}
+:root[data-motion="fluid"] .fl-in{opacity:1;transform:none;transition:opacity .7s cubic-bezier(.2,.9,.2,1),transform .8s cubic-bezier(.2,.9,.2,1);transition-delay:var(--fd,0ms)}
+:root[data-motion="fluid"] .btn{transition:transform .35s cubic-bezier(.34,1.56,.64,1),background .2s,border-color .2s,box-shadow .25s}
+:root[data-motion="fluid"] .btn:active{transform:scale(.95)}
+:root[data-motion="fluid"] .app{transition:transform .55s cubic-bezier(.2,.9,.2,1),border-radius .55s,filter .55s;transform-origin:50% 0}
+:root[data-motion="fluid"].sheet-open .app{transform:scale(.955) translateY(14px);border-radius:18px;overflow:hidden;filter:brightness(.8)}
+:root[data-motion="fluid"] .scrim{background:rgb(0 0 0 / calc(.45 * var(--shk)));animation:fadeIn .35s ease;align-items:end;padding-bottom:0}
+:root[data-motion="fluid"] .scrim .modal{animation:sheetUp .6s cubic-bezier(.2,.95,.2,1) both;border-radius:22px 22px 0 0;margin-bottom:0}
+@keyframes sheetUp{from{transform:translateY(100%)}}
+:root[data-motion="fluid"] .ttile{transition:transform .45s cubic-bezier(.34,1.56,.64,1),box-shadow .3s}
+:root[data-motion="fluid"] .ttile:active{transform:scale(.95)}
 </style>
 </head>
 <body>
@@ -5719,6 +5766,7 @@ details.card:not([open]){gap:0}
     <div class="foot">
       <button class="upd hidden" id="updPill"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg><span>Update to <b id="updVer"></b></span></button>
       <button class="help-btn" id="helpBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6M12 17h.01"/></svg>How to use</button>
+      <button class="help-btn wn-side" id="wnFab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>What's new<i class="wn-dot hidden" id="wnDot"></i></button>
       <div class="version" id="verLabel"></div>
     </div>
   </aside>
@@ -5738,7 +5786,7 @@ details.card:not([open]){gap:0}
       <div class="page-h">
         <div>
           <h1>Library</h1>
-          <p class="lede">The mods, resource packs and shaders you always play with. Add them once, then install them into any Minecraft version.</p>
+          <p class="lede">The mods, packs and shaders you always play with.</p>
         </div>
         <div class="actions"><button class="btn" onclick="openImport()">Import from a launcher</button></div>
       </div>
@@ -5789,7 +5837,7 @@ details.card:not([open]){gap:0}
       <div class="page-h">
         <div>
           <h1>Discover</h1>
-          <p class="lede">Popular and freshly updated for your Minecraft version, plus picks that go with what you already have.</p>
+          <p class="lede">What's popular for your version, plus picks that suit your mods.</p>
         </div>
       </div>
       <div class="disc-bar">
@@ -5806,7 +5854,7 @@ details.card:not([open]){gap:0}
     <section id="tab-install" class="hidden">
       <div class="page-h"><div>
         <h1>Install</h1>
-        <p class="lede">Pick a version and where your mods should go. ModHub does the rest.</p>
+        <p class="lede">Pick a version and a launcher. ModHub does the rest.</p>
       </div></div>
 
       <div class="block">
@@ -5883,7 +5931,7 @@ details.card:not([open]){gap:0}
       <div class="page-h">
         <div>
           <h1>Instances</h1>
-          <p class="lede">Everything ModHub has installed. Update keeps each one on the newest versions of its mods, for the same Minecraft version.</p>
+          <p class="lede">Everything ModHub has installed, ready to update.</p>
         </div>
         <div class="actions"><button class="btn go" id="updAll">Update all</button></div>
       </div>
@@ -5895,7 +5943,7 @@ details.card:not([open]){gap:0}
     <section id="tab-ports" class="hidden">
       <div class="page-h"><div>
         <h1>Ports</h1>
-        <p class="lede">Mods Claude is updating for you. Each port runs in its own terminal window, where you can follow along and approve Claude's steps. Finished ports are added automatically the next time you install.</p>
+        <p class="lede">Mods Claude is updating for you. Finished ones are added the next time you install.</p>
       </div></div>
       <div id="toolsWarn"></div>
       <div id="ports"></div>
@@ -5928,7 +5976,7 @@ details.card:not([open]){gap:0}
                 <div class="opt"><span class="opt-l">Corners</span><div class="seg optseg" data-opt="radius" role="radiogroup" aria-label="Corners"><button data-v="sharp" role="radio">Sharp</button><button data-v="rounded" role="radio">Rounded</button><button data-v="round" role="radio">Round</button></div></div>
                 <div class="opt"><span class="opt-l">Sidebar</span><div class="seg optseg" data-opt="side" role="radiogroup" aria-label="Sidebar"><button data-v="glass" role="radio">See-through</button><button data-v="solid" role="radio">Solid</button></div></div>
                 <div class="opt"><span class="opt-l">Size</span><div class="seg optseg" data-opt="size" role="radiogroup" aria-label="Size"><button data-v="90" role="radio" title="Small">S</button><button data-v="100" role="radio" title="Normal">M</button><button data-v="110" role="radio" title="Large">L</button><button data-v="120" role="radio" title="Larger">XL</button></div></div>
-                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
+                <div class="opt"><span class="opt-l">Animations</span><div class="seg optseg" data-opt="motion" role="radiogroup" aria-label="Animations"><button data-v="fluid" role="radio" title="A smoother, Apple-style feel. Still being tried out.">Fluid (try it)</button><button data-v="full" role="radio">Full</button><button data-v="less" role="radio">Fewer</button><button data-v="off" role="radio">Off</button></div></div>
                 <div class="opt reset"><button class="btn quiet sm" id="themeReset">Reset to default</button></div>
               </div>
             </div>
@@ -6013,7 +6061,6 @@ details.card:not([open]){gap:0}
   <div class="modal" id="chgBody" style="width:min(680px,100%)"></div>
 </div>
 
-<button class="wn-fab" id="wnFab" title="What's new in ModHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15.5l-1.9-4.6L5.5 9l4.6-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span>What's new</span><i class="wn-dot hidden" id="wnDot"></i></button>
 <!-- how to use -->
 <div class="scrim hidden" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
   <div class="modal howto">
@@ -8170,8 +8217,9 @@ function runCommand(raw) {
   b.style.cursor = "default";
   b.addEventListener("click", () => {
     clearTimeout(t); t = setTimeout(() => n = 0, 1400);
-    b.classList.remove("spin"); void b.offsetWidth; b.classList.add("spin");
+    b.classList.remove("twirl"); void b.offsetWidth; b.classList.add("twirl");
     if (++n === 5) { n = 0; unlockSecret("retro", "Old-school mode found!"); }
+    b.querySelector(".mark").addEventListener("animationend", () => b.classList.remove("twirl"), {once: true});
   });
 })();
 // night owls and big collections
@@ -8213,6 +8261,46 @@ function runCommand(raw) {
 })();
 // a little snow at the end of the year
 (() => { const d = new Date(); if (d.getMonth() === 11 && d.getDate() >= 20) setTimeout(() => weather("snow", 30000), 2500); })();
+
+/* ---------- Fluid motion trial ---------- */
+const FLUID = () => document.documentElement.dataset.motion === "fluid" && !motionQuery.matches;
+// big titles shrink and fade as you scroll, like an iPhone's large titles
+function fluidTitle() {
+  if (!FLUID()) return;
+  const sec = $$("main > section").find(x => !x.classList.contains("hidden")), h1 = sec && sec.querySelector("h1");
+  if (!h1) return;
+  const k = Math.min(1, Math.max(0, window.scrollY / 110));
+  h1.style.transform = `translateY(${(k * 10).toFixed(1)}px) scale(${(1 - k * .28).toFixed(3)})`;
+  h1.style.opacity = (1 - k * .9).toFixed(3);
+}
+window.addEventListener("scroll", () => requestAnimationFrame(fluidTitle), {passive: true});
+// cards ease in as they come into view
+const FLUID_SEL = ".card, .inst, .dcard, .res, .lopt, .empty, .ttile, .starter, .results, .banner, .slot";
+const flIO = "IntersectionObserver" in window ? new IntersectionObserver(es => es.forEach(e => {
+  if (!e.isIntersecting) return; flIO.unobserve(e.target); e.target.classList.add("fl-in"); e.target.classList.remove("fl-pre");
+  setTimeout(() => { e.target.classList.remove("fl-in"); e.target.style.removeProperty("--fd"); }, 1400);
+}), {threshold: .08}) : null;
+function fluidReveal(root) {
+  if (!FLUID() || !flIO || !root) return;
+  let i = 0;
+  root.querySelectorAll(FLUID_SEL).forEach(el => {
+    if (el.closest(".fl-pre") || !el.offsetParent) return;
+    el.classList.add("fl-pre"); el.style.setProperty("--fd", Math.min(i++, 10) * 45 + "ms"); flIO.observe(el);
+  });
+}
+const _go = go;
+go = function (tab) {
+  $$("main h1").forEach(h => { h.style.transform = ""; h.style.opacity = ""; });
+  _go(tab);
+  if (FLUID()) requestAnimationFrame(() => fluidReveal($("#tab-" + tab)));
+};
+$$(".nav").forEach(b => b.onclick = () => go(b.dataset.tab));
+// pop-ups slide up like sheets, and the app shrinks back behind them
+const sheetMO = new MutationObserver(() => {
+  const open = $$(".scrim").some(m => !m.classList.contains("hidden"));
+  document.documentElement.classList.toggle("sheet-open", open && FLUID());
+});
+$$(".scrim").forEach(m => sheetMO.observe(m, {attributes: true, attributeFilter: ["class"]}));
 </script>
 </body>
 </html>
