@@ -53,10 +53,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-APP_VERSION = "3.6"
+APP_VERSION = "3.7"
 FROZEN = bool(getattr(sys, "frozen", False))  # running inside ModHub.exe
 # What's new in each version of ModHub, newest first. Shown after an update, before one, and in Settings.
 APP_CHANGES = [
+    {"version": "3.7", "notes": [
+        "ModHub now checks your mods before you play: if an instance's mods change, even ones you added by hand, it checks and fixes them right away.",
+        "Spots two copies of the same mod and turns off the extra one.",
+        "Spots mods made for a different loader (like a NeoForge mod in a Fabric instance) and swaps in the right version, or turns it off if there isn't one.",
+    ]},
     {"version": "3.6", "notes": [
         "New: ModHub fixes \"Incompatible mods found!\" by itself. When Fabric, Quilt, NeoForge or Forge stops the game because mods don't work together, ModHub does what the error asks: adds missing mods, swaps in versions that fit, and turns off a mod that clashes.",
         "You'll see \"Fixing\" and then \"Fixed\" at the top of ModHub, with a list of what changed. Then just start Minecraft again.",
@@ -1005,6 +1010,12 @@ def maven_satisfies(version, rng):
 
 def _read_meta_from_zip(z, out, nested=True, depth=0):
     names = set(z.namelist())
+    if depth == 0:
+        fm = out.setdefault("formats", [])
+        for f, tag in (("fabric.mod.json", "fabric"), ("quilt.mod.json", "quilt"),
+                       ("META-INF/neoforge.mods.toml", "neoforge"), ("META-INF/mods.toml", "forge")):
+            if f in names:
+                fm.append(tag)
     if "fabric.mod.json" in names:
         try:
             m = json.loads(zread(z, "fabric.mod.json").decode("utf-8", "replace"), strict=False)
@@ -1130,15 +1141,40 @@ def _show(v):
     return str(v or "").split("+", 1)[0] or "an unknown version"
 
 
-def check_mods(folder: Path, gv=None):
-    """Find mods that are missing something, too old/new for each other, or made for another Minecraft."""
+def loads_on(formats, loader, gv=None):
+    """Can a mod built for these loaders run on this one?"""
+    ok = {"fabric": {"fabric"}, "quilt": {"quilt", "fabric"}, "forge": {"forge"},
+          "neoforge": {"neoforge"} | ({"forge"} if gv and version_tuple(gv) < (1, 20, 5) and not gv.startswith("2") else set())}
+    return bool(set(formats) & ok.get(loader, set()))
+
+
+def check_mods(folder: Path, gv=None, loader=None):
+    """Find mods that are missing something, too old/new for each other, made for another Minecraft
+    or another loader, or installed twice."""
     jars = sorted(f for f in folder.glob("*.jar")) if folder.is_dir() else []
     metas = [jar_meta(j) for j in jars]
+    problems = []
+    if loader:
+        for m in metas:
+            if m.get("formats") and not loads_on(m["formats"], loader, gv):
+                built = {"fabric": "Fabric", "quilt": "Quilt", "forge": "Forge", "neoforge": "NeoForge"}
+                problems.append({"type": "wrong_loader", "file": m["file"], "mod": m["name"], "mod_id": m["main"],
+                                 "style": "fabric", "message": f"{m['name']} is made for {built.get(m['formats'][0], m['formats'][0])}, "
+                                 f"so it won't load with {built.get(loader, loader)}."})
+        metas = [m for m in metas if not m.get("formats") or loads_on(m["formats"], loader, gv)]
+    by_main = {}
+    for m in metas:
+        if m["main"]:
+            by_main.setdefault(m["main"], []).append(m)
+    for mid, copies in by_main.items():
+        if len(copies) > 1:
+            problems.append({"type": "duplicate", "file": copies[0]["file"], "mod": copies[0]["name"], "mod_id": mid,
+                             "copies": [c["file"] for c in copies], "versions": [c["version"] for c in copies], "style": "fabric",
+                             "message": f"{copies[0]['name']} is installed {len(copies)} times ({', '.join(c['file'] for c in copies)})."})
     have = {}
     for m in metas:
         for mid, ver in m["ids"].items():
             have.setdefault(mid, (ver, m))
-    problems = []
     for m in metas:
         if not m["main"]:
             continue
@@ -1240,6 +1276,46 @@ def fix_problems(job, folder: Path, problems, gv, loader, managed=True):
                         job.log(f"  fixed: {pr['fix']}")
                         job.changes.append(pr["on_name"])
                         break
+            elif pr["type"] == "duplicate":
+                keep = next((c for c in pr["copies"] if c in by_file), None)
+                if not keep:  # the newest one wins
+                    keep = max(zip(pr["copies"], pr["versions"]), key=lambda cv: (version_tuple(cv[1] or "0"),
+                               (folder / cv[0]).stat().st_mtime if (folder / cv[0]).exists() else 0))[0]
+                for c in pr["copies"]:
+                    if c != keep and (folder / c).exists():
+                        os.replace(folder / c, folder / (c + ".disabled"))
+                pr.update(status="fixed", fix=f"Turned off the extra copy of {pr['mod']}, kept {keep}.")
+                job.log(f"  fixed: {pr['fix']}")
+                job.changes.append(pr["mod"])
+            elif pr["type"] == "wrong_loader":
+                old = folder / pr["file"]
+                job.log(f"Looking for the {LOADER_NAMES_PY.get(loader, loader)} version of {pr['mod']}...")
+                v = None
+                try:
+                    sha = hashlib.sha1(old.read_bytes()).hexdigest()
+                    found = http_json("POST", f"{MODRINTH}/version_files", {"hashes": [sha], "algorithm": "sha1"}) or {}
+                    pid = (found.get(sha) or {}).get("project_id")
+                    v = pid and mr_latest_for(pid, loaders, gv)
+                except Exception:
+                    v = None
+                f = v and mr_primary_file(v)
+                try:
+                    if f:
+                        download(f["url"], folder / f["filename"], (f.get("hashes") or {}).get("sha1"))
+                        key = by_file.get(pr["file"])
+                        if managed and key:
+                            manifest[key] = f["filename"]
+                        if old.exists() and old.name != f["filename"]:
+                            old.unlink()
+                        pr.update(status="fixed", fix=f"Swapped {pr['mod']} for its {LOADER_NAMES_PY.get(loader, loader)} version.")
+                    elif old.exists():
+                        os.replace(old, old.with_name(old.name + ".disabled"))
+                        pr.update(status="fixed", fix=f"Turned off {pr['mod']}: there's no {LOADER_NAMES_PY.get(loader, loader)} version of it yet.")
+                    if pr["status"] == "fixed":
+                        job.log(f"  fixed: {pr['fix']}")
+                        job.changes.append(pr["mod"])
+                except Exception:
+                    traceback.print_exc()
             elif pr["type"] == "missing":
                 job.log(f"Looking for {pr['on']}, which {pr['mod']} needs...")
                 try:
@@ -1263,7 +1339,7 @@ def fix_problems(job, folder: Path, problems, gv, loader, managed=True):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     # anything still open? check again, because one fix can solve (or reveal) another
-    left = check_mods(folder, gv)
+    left = check_mods(folder, gv, loader)
     open_keys = {(x["type"], x["file"], x.get("on")) for x in left}
     for pr in problems:
         if pr["status"] == "open" and (pr["type"], pr["file"], pr.get("on")) not in open_keys:
@@ -1276,7 +1352,7 @@ def fix_problems(job, folder: Path, problems, gv, loader, managed=True):
 
 def check_and_fix(job, folder: Path, gv, loader, managed=True):
     job.log("Checking that your mods work together...")
-    problems = check_mods(folder, gv)
+    problems = check_mods(folder, gv, loader)
     if problems:
         problems = fix_problems(job, folder, problems, gv, loader, managed)
     still = [x for x in problems if x["status"] == "open"]
@@ -1494,6 +1570,87 @@ def start_autofix(iid, text):
                  "still": [{"message": p["message"], "file": p.get("file"), "mod": p.get("mod")} for p in res["still"]]})
         return res
     return start_job(runner)
+
+
+def minecraft_running():
+    """Is the game open? (Then ModHub leaves its files alone.)"""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["tasklist", "/V", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                                 creationflags=0x08000000, timeout=20).stdout.lower()
+            return any(("javaw.exe" in l or "java.exe" in l) and "minecraft" in l for l in out.splitlines())
+        out = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True, timeout=20).stdout
+        return any("java" in l and ("minecraft" in l.lower() or "net.fabricmc" in l) for l in out.splitlines())
+    except Exception:
+        return False
+
+
+def _folder_sig(folder: Path):
+    try:
+        return hashlib.sha1(json.dumps(sorted((f.name, f.stat().st_size, int(f.stat().st_mtime))
+                                              for f in folder.iterdir() if f.suffix.lower() == ".jar")).encode()).hexdigest()
+    except OSError:
+        return None
+
+
+PRECHECK_SECONDS = 90
+PRECHECK_FIRST = 30
+
+
+def precheck_watch():
+    """When an instance's mods change (even outside ModHub), check and fix them before the game is started."""
+    time.sleep(PRECHECK_FIRST)
+    while True:
+        try:
+            with CFG_LOCK:
+                recs = [dict(r) for r in CFG.get("installs", []) if not r.get("export") and r.get("path")]
+                auto = CFG.get("autofix_mods", True)
+            busy = any(not j.done for j in list(JOBS.values()))
+            if auto and recs and not busy and not minecraft_running():
+                for r in recs:
+                    folder = Path(r["path"])
+                    sig = _folder_sig(folder) if folder.is_dir() else None
+                    if not sig or sig == r.get("checked_sig"):
+                        continue
+                    if r.get("checked_sig") is None:  # first time ModHub sees it: just remember, the install already checked it
+                        _set_checked(r["id"], sig)
+                        continue
+                    job = start_job(lambda job, rid=r["id"]: precheck_instance(job, rid))
+                    while not JOBS[job].done:
+                        time.sleep(1)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(PRECHECK_SECONDS)
+
+
+def _set_checked(iid, sig):
+    with CFG_LOCK:
+        for x in CFG.get("installs", []):
+            if x["id"] == iid:
+                x["checked_sig"] = sig
+        save_config(CFG)
+
+
+def precheck_instance(job, iid):
+    with CFG_LOCK:
+        rec = next((dict(r) for r in CFG.get("installs", []) if r["id"] == iid), None)
+    if not rec:
+        return {}
+    folder = Path(rec["path"])
+    job.log(f"{rec['name']}'s mods changed. Checking them before you play...")
+    probs = check_and_fix(job, folder, rec["version"], rec["loader"], managed=True)
+    _set_checked(iid, _folder_sig(folder))
+    fixed = [p["fix"] for p in probs if p.get("status") == "fixed" and p.get("fix")]
+    still = [{"message": p["message"], "file": p.get("file"), "mod": p.get("mod")} for p in probs if p.get("status") == "open"]
+    if fixed or still:
+        entry = {"install_id": iid, "instance": rec["name"], "version": rec["version"], "loader": rec["loader"], "file": "",
+                 "at": now_iso(), "kind": "precheck", "title": "Some mods wouldn't have worked together", "fix_check": True,
+                 "explain": "", "culprits": [],
+                 "autofix": {"status": "fixed" if not still else "partly" if fixed else "failed", "fixed": fixed, "still": still}}
+        with CFG_LOCK:
+            CFG["crashes"] = [c for c in CFG.get("crashes", []) if c["install_id"] != iid] + [entry]
+            save_config(CFG)
+    return {"fixed": fixed, "still": still}
 
 
 def _newest_crash_file(game_dir: Path, after: float):
@@ -2089,6 +2246,8 @@ def record_install(req, ctx, lid, lname, mods_dir, export, items, updates=None):
         old = next((r for r in installs if r["id"] == iid), None)
         rec["installed"] = old.get("installed", now) if old else now
         rec["disabled"] = (old or {}).get("disabled", [])
+        if not export:  # ModHub just checked this folder itself
+            rec["checked_sig"] = _folder_sig(Path(mods_dir))
         if updates:  # remember the latest round of changes for "What changed"
             rec["last_changes"] = [dict(u, changelog=(u.get("changelog") or "")[:1500]) for u in updates][:40]
             rec["changes_at"] = now
@@ -2140,6 +2299,7 @@ def check_instance_job(job, iid):
     if not folder.is_dir():
         raise UserError(f"{rec['name']}'s mods folder is gone.")
     problems = check_and_fix(job, folder, rec["version"], rec["loader"], managed=True)
+    _set_checked(iid, _folder_sig(folder))
     return {"problems": problems, "install_id": iid, "instance": rec["name"]}
 
 
@@ -4529,6 +4689,7 @@ def main():
     threading.Thread(target=update_watch, daemon=True).start()
     threading.Thread(target=watch_loop, daemon=True).start()
     threading.Thread(target=crash_watch, daemon=True).start()
+    threading.Thread(target=precheck_watch, daemon=True).start()
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PREFERRED_PORT
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -6960,6 +7121,10 @@ function crashLine(c) {
   const fx = c.autofix || {};
   if (fx.status === "fixing") return {cls: "fixing", icon: `<span class="spin"></span>`, title: `Fixing ${c.instance}`,
     text: "Minecraft said some mods don't work together. ModHub is sorting it out by itself.", show: ""};
+  if (c.kind === "precheck" && fx.status === "fixed") return {cls: "ok", icon: "✓", title: `Fixed ${c.instance} before you play`,
+    text: `${c.instance}'s mods changed, so ModHub checked them. ${fx.fixed.length === 1 ? fx.fixed[0] : `It made ${fx.fixed.length} fixes so they work together.`}`, show: "See what changed"};
+  if (c.kind === "precheck") return {cls: "", icon: "!", title: `${c.instance} has mods that won't work together`,
+    text: fx.fixed && fx.fixed.length ? `ModHub fixed ${fx.fixed.length}, but ${fx.still.length} ${fx.still.length === 1 ? "problem needs" : "problems need"} you before you play.` : "ModHub couldn't fix this by itself. Have a look before you play.", show: "See what's left"};
   if (fx.status === "fixed") return {cls: "ok", icon: "✓", title: `Fixed ${c.instance}`,
     text: `${fx.fixed.length === 1 ? fx.fixed[0] : `ModHub made ${fx.fixed.length} fixes so your mods work together.`} Start Minecraft again.`, show: "See what changed"};
   if (fx.status === "partly") return {cls: "", icon: "!", title: `Fixed part of ${c.instance}`,
@@ -6994,13 +7159,15 @@ function openCrash(id) {
       ${p.file ? `<div class="actions"><button class="btn sm" data-coff="${esc(p.file)}">Turn off ${esc(p.mod || "this mod")}</button></div>` : ""}</div></div>`).join("");
   $("#crashBody").innerHTML = `
     <h2 id="crashTitle">${esc(fx.status === "fixed" ? `ModHub fixed ${c.instance}` : c.title)}</h2>
-    <p class="lede">${esc(c.instance)}, Minecraft ${esc(c.version)} with ${LOADER_NAMES[c.loader] || esc(c.loader)}. ${esc(fx.status === "fixed" ? "Minecraft said some mods didn't work together. Here's what ModHub did. Start the game again." : fx.status === "partly" ? "ModHub fixed what it could. The rest needs you." : c.explain)}</p>
+    <p class="lede">${esc(c.instance)}, Minecraft ${esc(c.version)} with ${LOADER_NAMES[c.loader] || esc(c.loader)}. ${esc(c.kind === "precheck"
+      ? (fx.status === "fixed" ? "Its mods changed, so ModHub checked them before you play. Here's what it did." : "Its mods changed, so ModHub checked them. ModHub fixed what it could. The rest needs you.")
+      : fx.status === "fixed" ? "Minecraft said some mods didn't work together. Here's what ModHub did. Start the game again." : fx.status === "partly" ? "ModHub fixed what it could. The rest needs you." : c.explain)}</p>
     ${fixedRows}${stillRows}
     ${culprits.map(m => `<div class="prob open"><div class="ic">!</div><div class="grow"><b>${esc(m.name)}</b><p>Named in the crash report.</p>
         <div class="actions"><button class="btn sm" data-coff="${esc(m.file)}">Turn off ${esc(m.name)}</button></div></div></div>`).join("")}
     ${c.error ? `<div class="errline">${esc(c.error)}</div>` : ""}
     <div class="foot" style="justify-content:space-between;flex-wrap:wrap">
-      <span class="actions"><button class="btn quiet" id="crashCopy">Copy for Claude</button><button class="btn quiet" id="crashOpen">Open crash report</button></span>
+      <span class="actions">${c.file ? `<button class="btn quiet" id="crashCopy">Copy for Claude</button><button class="btn quiet" id="crashOpen">Open crash report</button>` : ""}</span>
       <span class="actions">${c.fix_check && fx.status !== "fixed" ? `<button class="btn go" id="crashFix">${fx.status ? "Try again" : "Fix it"}</button>` : ""}<button class="btn ${c.fix_check && fx.status !== "fixed" ? "" : "go"}" data-close>Done</button></span>
     </div>`;
   openModal("#crashModal");
@@ -7013,11 +7180,11 @@ function openCrash(id) {
       toast("Turned off");
     } catch (e) { toast(e.message); b.disabled = false; }
   });
-  $("#crashCopy").onclick = async () => {
+  if ($("#crashCopy")) $("#crashCopy").onclick = async () => {
     try { const r = await api("/api/crashes/excerpt", {id}); await navigator.clipboard.writeText(r.text); toast("Copied. Paste it into a chat with Claude"); }
     catch (e) { toast(e.message); }
   };
-  $("#crashOpen").onclick = () => api("/api/open", {path: c.file}).catch(e => toast(e.message));
+  if ($("#crashOpen")) $("#crashOpen").onclick = () => api("/api/open", {path: c.file}).catch(e => toast(e.message));
   const fix = $("#crashFix");
   if (fix) fix.onclick = async () => {
     fix.disabled = true; fix.innerHTML = `<span class="spin"></span> Fixing`;
